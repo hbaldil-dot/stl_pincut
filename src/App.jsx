@@ -7,6 +7,7 @@ import { Scissors, Download, Upload, Sliders, Eye, Brush, CheckCircle, Undo2 } f
 
 function SceneManager({ model, isPainting, paintedFaces, setPaintedFaces, cutPoints, isShiftPressed, brushSize, history, setHistory }) {
   const [isMouseDown, setIsMouseDown] = useState(false);
+  const { camera } = useThree();
 
   const handlePointerDown = (e) => {
     if (isShiftPressed || !isPainting) return;
@@ -32,9 +33,13 @@ function SceneManager({ model, isPainting, paintedFaces, setPaintedFaces, cutPoi
     if (!model) return;
     const geometry = model.geometry;
     const posAttr = geometry.attributes.position;
+    const normalAttr = geometry.attributes.normal;
     const newlyPainted = [];
 
     const faceCount = posAttr.count / 3;
+    const cameraDir = new THREE.Vector3();
+    camera.getWorldPosition(cameraDir);
+
     for (let i = 0; i < faceCount; i++) {
       const i3 = i * 3;
       const vA = new THREE.Vector3(posAttr.getX(i3), posAttr.getY(i3), posAttr.getZ(i3)).applyMatrix4(model.matrixWorld);
@@ -43,9 +48,25 @@ function SceneManager({ model, isPainting, paintedFaces, setPaintedFaces, cutPoi
 
       const center = new THREE.Vector3().addVectors(vA, vB).add(vC).divideScalar(3);
 
+      // Fırça yarıçapı kontrolü
       if (center.distanceTo(hitPoint) <= brushSize) {
-        if (!paintedFaces.has(i)) {
-          newlyPainted.push(i);
+        // Yüzeyin normale bakış açısı kontrolü (Sadece kameraya bakan ön yüzler boyansın, arkadakiler boyanmasın)
+        if (normalAttr) {
+          const nA = new THREE.Vector3(normalAttr.getX(i3), normalAttr.getY(i3), normalAttr.getZ(i3));
+          const nB = new THREE.Vector3(normalAttr.getX(i3+1), normalAttr.getY(i3+1), normalAttr.getZ(i3+1));
+          const nC = new THREE.Vector3(normalAttr.getX(i3+2), normalAttr.getY(i3+2), normalAttr.getZ(i3+2));
+          const faceNormal = new THREE.Vector3().add(nA).add(nB).add(nC).normalize();
+          faceNormal.transformDirection(model.matrixWorld);
+
+          const toCameraDir = new THREE.Vector3().subVectors(cameraDir, center).normalize();
+          // Eğer yüzey kameraya bakıyorsa (açı uygunsa) boyamaya ekle
+          if (faceNormal.dot(toCameraDir) > -0.2) {
+            if (!paintedFaces.has(i)) {
+              newlyPainted.push(i);
+            }
+          }
+        } else {
+          if (!paintedFaces.has(i)) newlyPainted.push(i);
         }
       }
     }
@@ -110,7 +131,7 @@ function SceneManager({ model, isPainting, paintedFaces, setPaintedFaces, cutPoi
 export default function App() {
   const [model, setModel] = useState(null);
   const [pinSize, setPinSize] = useState(5);
-  const [brushSize, setBrushSize] = useState(5); // Fırça boyutu state'i
+  const [brushSize, setBrushSize] = useState(5);
   const [pinType, setPinType] = useState('pyramid');
   const [isPainting, setIsPainting] = useState(false);
   const [paintedFaces, setPaintedFaces] = useState(new Set());
@@ -151,7 +172,7 @@ export default function App() {
         roughness: 0.3,
         metalness: 0.1,
         wireframe: true,
-        side: THREE.DoubleSide,
+        side: THREE.FrontSide, // Sadece ön yüzlerin görünmesi çakışmaları engeller
       });
 
       const colors = new Float32Array(geometry.attributes.position.count * 3);
@@ -199,7 +220,6 @@ export default function App() {
     setCutPoints([]);
   };
 
-  // Kararlı ve düzgün Spline kement oluşturma algoritması
   const handleCompletePainting = () => {
     if (paintedFaces.size === 0 || !model) {
       alert("Lütfen önce model üzerinde bazı yüzeyleri boyayın.");
@@ -245,7 +265,6 @@ export default function App() {
       return;
     }
 
-    // Zincirleme sıralama
     const orderedVectors = [];
     let currentSeg = boundarySegments.pop();
     orderedVectors.push(currentSeg[0], currentSeg[1]);
@@ -268,10 +287,9 @@ export default function App() {
 
     if (orderedVectors.length < 3) return;
 
-    // Hat üzerindeki gürültüleri azaltmak için noktaları seyreltip CatmullRomCurve3 uyguluyoruz
     const simplified = [orderedVectors[0]];
     for (let i = 1; i < orderedVectors.length; i++) {
-      if (orderedVectors[i].distanceTo(simplified[simplified.length - 1]) > 1.2) {
+      if (orderedVectors[i].distanceTo(simplified[simplified.length - 1]) > 1.5) {
         simplified.push(orderedVectors[i]);
       }
     }
@@ -307,7 +325,7 @@ export default function App() {
         {model && (
           <div className="flex flex-col gap-4 border-t border-gray-800 pt-4">
             <h2 className="text-md font-semibold text-gray-200 flex items-center gap-2">
-              <Sliders className="w-4 h-4" /> Kesim ve Pin Yapılandırması
+              <Sliders className="w-4 h-4" /> Kesim و Pin Yapılandırması
             </h2>
 
             <button 
@@ -342,7 +360,6 @@ export default function App() {
               />
             </div>
 
-            {/* Fırça Boyutu Ayarı */}
             <div>
               <label className="text-xs text-gray-400 mb-1 block">Fırça Kalınlığı: {brushSize} mm</label>
               <input 
@@ -412,7 +429,7 @@ export default function App() {
 
         {isPainting && (
           <div className="absolute top-4 right-4 bg-amber-500/20 border border-amber-500 text-amber-300 px-4 py-2 rounded-lg text-sm backdrop-blur-md shadow-lg flex items-center gap-2">
-            <span>🎨 Fırça Boyutu: Sol panelden kalınlığı ayarlayabilir, hatalı boyamaları <b>Geri Al</b> ile silebilirsiniz.</span>
+            <span>🎨 Arka yüzeylerin boyanması engellendi. Artık sadece kameraya bakan ön yüzler boyanıyor.</span>
           </div>
         )}
       </div>
