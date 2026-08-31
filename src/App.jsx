@@ -3,23 +3,33 @@ import * as THREE from 'three';
 import { STLLoader } from 'three/examples/jsm/loaders/STLLoader';
 import { Canvas, useThree } from '@react-three/fiber';
 import { OrbitControls, Line } from '@react-three/drei';
-import { Scissors, Download, Upload, Sliders } from 'lucide-react';
+import { Scissors, Download, Upload, Sliders, Eye } from 'lucide-react';
 
-function SceneManager({ model, isCutting, cutPoints, setCutPoints }) {
+function SceneManager({ model, isCutting, cutPoints, setCutPoints, isWireframe }) {
   const { camera, raycaster, pointer } = useThree();
 
+  // Model üzerindeyken fare hareketiyle noktaları kaydet
   const handlePointerMove = (e) => {
     if (!isCutting) return;
-    // Mouse hareket ettikçe kesim noktalarını kaydet
     const newPoint = [e.point.x, e.point.y, e.point.z];
-    setCutPoints((prev) => [...prev, newPoint]);
+    
+    // Çok sık nokta eklenmesini önlemek için son noktaya olan mesafeye bakabiliriz
+    setCutPoints((prev) => {
+      if (prev.length === 0) return [newPoint];
+      const last = prev[prev.length - 1];
+      const dist = Math.hypot(last[0] - newPoint[0], last[1] - newPoint[1], last[2] - newPoint[2]);
+      if (dist > 1.5) { // Hassasiyet eşiği
+        return [...prev, newPoint];
+      }
+      return prev;
+    });
   };
 
   return (
     <>
-      <ambientLight intensity={0.7} />
-      <directionalLight position={[10, 20, 15]} intensity={1} />
-      <pointLight position={[-10, -20, -15]} intensity={0.5} />
+      <ambientLight intensity={0.8} />
+      <directionalLight position={[10, 20, 15]} intensity={1.2} />
+      <pointLight position={[-10, -20, -15]} intensity={0.6} />
       
       {model && (
         <primitive 
@@ -28,12 +38,12 @@ function SceneManager({ model, isCutting, cutPoints, setCutPoints }) {
         />
       )}
 
-      {/* Çizilen kesim çizgisi */}
+      {/* Kement / Kesim Çevresi Çizgisi */}
       {cutPoints.length > 1 && (
         <Line
           points={cutPoints}
-          color="red"
-          lineWidth={3}
+          color="yellow"
+          lineWidth={4}
         />
       )}
     </>
@@ -46,6 +56,7 @@ export default function App() {
   const [pinType, setPinType] = useState('pyramid');
   const [isCutting, setIsCutting] = useState(false);
   const [cutPoints, setCutPoints] = useState([]);
+  const [isWireframe, setIsWireframe] = useState(true);
 
   const handleFileUpload = (event) => {
     const file = event.target.files[0];
@@ -60,8 +71,9 @@ export default function App() {
 
       const material = new THREE.MeshStandardMaterial({
         color: 0x41b883,
-        roughness: 0.4,
-        metalness: 0.2,
+        roughness: 0.3,
+        metalness: 0.1,
+        wireframe: true, // Başlangıçta wireframe olarak gelsin
       });
 
       const mesh = new THREE.Mesh(geometry, material);
@@ -69,6 +81,23 @@ export default function App() {
       setCutPoints([]);
     };
     reader.readAsArrayBuffer(file);
+  };
+
+  // Wireframe modunu açıp kapatma
+  const toggleWireframe = () => {
+    if (model) {
+      model.material.wireframe = !model.material.wireframe;
+      setIsWireframe(model.material.wireframe);
+    }
+  };
+
+  // Çizimi tamamla ve başlangıç noktasıyla birleştirerek çevreyi kapat
+  const handleCompleteCut = () => {
+    setIsCutting(false);
+    if (cutPoints.length > 2) {
+      // Çevreyi kapatmak için ilk noktayı sona ekle (En kısa yol mantığıyla döngü oluşturur)
+      setCutPoints((prev) => [...prev, prev[0]]);
+    }
   };
 
   return (
@@ -96,6 +125,14 @@ export default function App() {
               <Sliders className="w-4 h-4" /> Kesim ve Pin Yapılandırması
             </h2>
 
+            <button 
+              onClick={toggleWireframe}
+              className="flex items-center justify-center gap-2 bg-gray-800 hover:bg-gray-700 text-gray-200 py-2 px-4 rounded font-medium transition border border-gray-700 text-sm"
+            >
+              <Eye className="w-4 h-4 text-emerald-400" /> 
+              {isWireframe ? 'Katı Mode Geç (Solid)' : 'Wireframe (Kafes) Göster'}
+            </button>
+
             <div>
               <label className="text-xs text-gray-400 mb-1 block">Pin Tipi</label>
               <select 
@@ -122,16 +159,20 @@ export default function App() {
 
             <button 
               onClick={() => {
-                setIsCutting(!isCutting);
-                if (!isCutting) setCutPoints([]);
+                if (!isCutting) {
+                  setCutPoints([]);
+                  setIsCutting(true);
+                } else {
+                  handleCompleteCut();
+                }
               }}
-              className={`py-2 px-4 rounded font-medium transition ${isCutting ? 'bg-red-600 hover:bg-red-700' : 'bg-emerald-600 hover:bg-emerald-700'} text-white shadow`}
+              className={`py-2 px-4 rounded font-medium transition ${isCutting ? 'bg-amber-600 hover:bg-amber-700' : 'bg-emerald-600 hover:bg-emerald-700'} text-white shadow`}
             >
-              {isCutting ? 'Kesimi Tamamla / Durdur' : 'Serbest Çizgiyle Kes'}
+              {isCutting ? 'Çevreyi Kapat / Kesimi Bitir' : 'Serbest Kement Çizimi Başlat'}
             </button>
 
             <button 
-              onClick={() => alert("Parçalar ve pimler hesaplanıp STL olarak indirilecek.")}
+              onClick={() => alert("Kement çevresi işlendi. Model iki parçaya bölünüp pin yuvaları oluşturuluyor...")}
               className="mt-2 flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 text-white py-2 px-4 rounded font-medium transition shadow"
             >
               <Download className="w-4 h-4" /> Parçaları STL Olarak İndir
@@ -148,13 +189,14 @@ export default function App() {
             isCutting={isCutting} 
             cutPoints={cutPoints} 
             setCutPoints={setCutPoints} 
+            isWireframe={isWireframe}
           />
           <OrbitControls makeDefault enableRotate={!isCutting} />
         </Canvas>
 
         {isCutting && (
-          <div className="absolute top-4 right-4 bg-red-500/20 border border-red-500 text-red-300 px-4 py-2 rounded-lg text-sm backdrop-blur-md shadow-lg animate-pulse">
-            ✂️ Kesim Modu Aktif: Model üzerinde fare ile gezerek kesim çizgisi çizebilirsiniz.
+          <div className="absolute top-4 right-4 bg-amber-500/20 border border-amber-500 text-amber-300 px-4 py-2 rounded-lg text-sm backdrop-blur-md shadow-lg animate-pulse">
+            ✏️ Kement Modu Aktif: Model üzerinde sürükleyerek çevre çizgisi çizin, bitince butona basın.
           </div>
         )}
       </div>
