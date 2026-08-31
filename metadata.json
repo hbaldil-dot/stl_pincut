@@ -1,0 +1,6 @@
+{
+  "name": "STL PinCut 3D",
+  "description": "3D STL model viewer, cut plane painting, and alignment pin generator for 3D printing",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

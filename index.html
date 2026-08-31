@@ -3,12 +3,30 @@
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
     <title>STL PinCut 3D</title>
     <!-- Tailwind CSS CDN -->
     <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+      tailwind.config = {
+        theme: {
+          extend: {
+            colors: {
+              emerald: {
+                400: '#34d399',
+                500: '#10b981',
+                600: '#059669',
+                700: '#047857',
+                900: '#064e3b',
+                950: '#022c22'
+              }
+            }
+          }
+        }
+      }
+    </script>
   </head>
-  <body class="bg-gray-950 text-white m-0 p-0 overflow-hidden">
+  <body class="bg-gray-950 text-white m-0 p-0 overflow-hidden select-none">
     <div id="root"></div>
     <script type="module" src="/src/main.jsx"></script>
   </body>
