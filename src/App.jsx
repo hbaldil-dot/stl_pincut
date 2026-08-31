@@ -5,7 +5,7 @@ import { Canvas, useThree } from '@react-three/fiber';
 import { OrbitControls, Line } from '@react-three/drei';
 import { Scissors, Download, Upload, Sliders, Eye, Brush, CheckCircle, Undo2 } from 'lucide-react';
 
-function SceneManager({ model, isPainting, paintedFaces, setPaintedFaces, cutPoints, isShiftPressed, history, setHistory }) {
+function SceneManager({ model, isPainting, paintedFaces, setPaintedFaces, cutPoints, isShiftPressed, brushSize, history, setHistory }) {
   const [isMouseDown, setIsMouseDown] = useState(false);
 
   const handlePointerDown = (e) => {
@@ -28,16 +28,12 @@ function SceneManager({ model, isPainting, paintedFaces, setPaintedFaces, cutPoi
     setIsMouseDown(false);
   };
 
-  // Kalın fırça etkisi: Dokunulan 3D noktaya yakın olan komşu yüzeyleri de boya
   const paintArea = (hitPoint) => {
     if (!model) return;
     const geometry = model.geometry;
     const posAttr = geometry.attributes.position;
     const newlyPainted = [];
 
-    const brushRadius = 4.5; // Fırça kalınlığı (düzenlenebilir)
-
-    // Tüm yüzeyleri tarayıp tıklanan noktaya yakın olanları bul
     const faceCount = posAttr.count / 3;
     for (let i = 0; i < faceCount; i++) {
       const i3 = i * 3;
@@ -47,7 +43,7 @@ function SceneManager({ model, isPainting, paintedFaces, setPaintedFaces, cutPoi
 
       const center = new THREE.Vector3().addVectors(vA, vB).add(vC).divideScalar(3);
 
-      if (center.distanceTo(hitPoint) <= brushRadius) {
+      if (center.distanceTo(hitPoint) <= brushSize) {
         if (!paintedFaces.has(i)) {
           newlyPainted.push(i);
         }
@@ -55,7 +51,6 @@ function SceneManager({ model, isPainting, paintedFaces, setPaintedFaces, cutPoi
     }
 
     if (newlyPainted.length > 0) {
-      // Undo için mevcut durumu geçmişe kaydet
       setHistory((prev) => [...prev, new Set(paintedFaces)]);
 
       setPaintedFaces((prev) => {
@@ -99,7 +94,7 @@ function SceneManager({ model, isPainting, paintedFaces, setPaintedFaces, cutPoi
         />
       )}
 
-      {/* Spline Eğrisi Kement Hattı */}
+      {/* Pürüzsüz Spline Kement Hattı */}
       {cutPoints.length > 1 && (
         <Line
           points={cutPoints}
@@ -115,6 +110,7 @@ function SceneManager({ model, isPainting, paintedFaces, setPaintedFaces, cutPoi
 export default function App() {
   const [model, setModel] = useState(null);
   const [pinSize, setPinSize] = useState(5);
+  const [brushSize, setBrushSize] = useState(5); // Fırça boyutu state'i
   const [pinType, setPinType] = useState('pyramid');
   const [isPainting, setIsPainting] = useState(false);
   const [paintedFaces, setPaintedFaces] = useState(new Set());
@@ -178,7 +174,6 @@ export default function App() {
     }
   };
 
-  // Geri Al (Undo) Fonksiyonu
   const handleUndo = () => {
     if (history.length === 0 || !model) return;
 
@@ -186,7 +181,6 @@ export default function App() {
     setHistory((prev) => prev.slice(0, prev.length - 1));
     setPaintedFaces(previousFaces);
 
-    // Renkleri sıfırla ve kalanları tekrar kırmızı yap
     const geometry = model.geometry;
     const colorAttr = geometry.attributes.color;
     const count = geometry.attributes.position.count;
@@ -205,7 +199,7 @@ export default function App() {
     setCutPoints([]);
   };
 
-  // Boyama tamamlandığında pürüzsüz Spline kement oluşturma
+  // Kararlı ve düzgün Spline kement oluşturma algoritması
   const handleCompletePainting = () => {
     if (paintedFaces.size === 0 || !model) {
       alert("Lütfen önce model üzerinde bazı yüzeyleri boyayın.");
@@ -251,6 +245,7 @@ export default function App() {
       return;
     }
 
+    // Zincirleme sıralama
     const orderedVectors = [];
     let currentSeg = boundarySegments.pop();
     orderedVectors.push(currentSeg[0], currentSeg[1]);
@@ -258,13 +253,13 @@ export default function App() {
     while (boundarySegments.length > 0) {
       const lastPoint = orderedVectors[orderedVectors.length - 1];
       const nextIdx = boundarySegments.findIndex(seg => 
-        seg[0].distanceTo(lastPoint) < 1.0 || seg[1].distanceTo(lastPoint) < 1.0
+        seg[0].distanceTo(lastPoint) < 1.5 || seg[1].distanceTo(lastPoint) < 1.5
       );
 
       if (nextIdx === -1) break;
 
       const [s1, s2] = boundarySegments.splice(nextIdx, 1)[0];
-      if (s1.distanceTo(lastPoint) < 1.0) {
+      if (s1.distanceTo(lastPoint) < 1.5) {
         orderedVectors.push(s2);
       } else {
         orderedVectors.push(s1);
@@ -273,9 +268,20 @@ export default function App() {
 
     if (orderedVectors.length < 3) return;
 
-    // CatmullRomCurve3 ile kusursuz pürüzsüz spline eğrisi
-    const curve = new THREE.CatmullRomCurve3(orderedVectors, true, 'centripetal', 0.5);
-    const sampledPoints = curve.getPoints(150);
+    // Hat üzerindeki gürültüleri azaltmak için noktaları seyreltip CatmullRomCurve3 uyguluyoruz
+    const simplified = [orderedVectors[0]];
+    for (let i = 1; i < orderedVectors.length; i++) {
+      if (orderedVectors[i].distanceTo(simplified[simplified.length - 1]) > 1.2) {
+        simplified.push(orderedVectors[i]);
+      }
+    }
+
+    if (simplified.length < 3) {
+      simplified.push(orderedVectors[Math.floor(orderedVectors.length / 2)]);
+    }
+
+    const curve = new THREE.CatmullRomCurve3(simplified, true, 'catmullrom', 0.3);
+    const sampledPoints = curve.getPoints(200);
 
     const formattedPoints = sampledPoints.map(v => [v.x, v.y, v.z]);
     setCutPoints(formattedPoints);
@@ -336,6 +342,19 @@ export default function App() {
               />
             </div>
 
+            {/* Fırça Boyutu Ayarı */}
+            <div>
+              <label className="text-xs text-gray-400 mb-1 block">Fırça Kalınlığı: {brushSize} mm</label>
+              <input 
+                type="range" 
+                min="2" 
+                max="15" 
+                value={brushSize} 
+                onChange={(e) => setBrushSize(Number(e.target.value))}
+                className="w-full accent-amber-400 cursor-pointer"
+              />
+            </div>
+
             <div className="flex gap-2">
               <button 
                 onClick={() => setIsPainting(!isPainting)}
@@ -384,6 +403,7 @@ export default function App() {
             setPaintedFaces={setPaintedFaces}
             cutPoints={cutPoints} 
             isShiftPressed={isShiftPressed}
+            brushSize={brushSize}
             history={history}
             setHistory={setHistory}
           />
@@ -392,7 +412,7 @@ export default function App() {
 
         {isPainting && (
           <div className="absolute top-4 right-4 bg-amber-500/20 border border-amber-500 text-amber-300 px-4 py-2 rounded-lg text-sm backdrop-blur-md shadow-lg flex items-center gap-2">
-            <span>🎨 Kalın Fırça Aktif: İstediğiniz bölgeyi fırçalayın. Yanlış yaparsanız <b>Geri Al</b> butonunu kullanabilirsiniz.</span>
+            <span>🎨 Fırça Boyutu: Sol panelden kalınlığı ayarlayabilir, hatalı boyamaları <b>Geri Al</b> ile silebilirsiniz.</span>
           </div>
         )}
       </div>
