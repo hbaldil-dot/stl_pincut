@@ -1,69 +1,62 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import * as THREE from 'three';
 import { STLLoader } from 'three/examples/jsm/loaders/STLLoader';
 import { Canvas, useThree } from '@react-three/fiber';
 import { OrbitControls, Line } from '@react-three/drei';
-import { Scissors, Download, Upload, Sliders, Eye, CheckSquare } from 'lucide-react';
+import { Scissors, Download, Upload, Sliders, Eye, Brush, CheckCircle } from 'lucide-react';
 
-function SceneManager({ model, isSelecting, selectedFaces, setSelectedFaces, cutPoints, setCutPoints, isShiftPressed }) {
-  const [hoveredFace, setHoveredFace] = useState(null);
+function SceneManager({ model, isPainting, paintedFaces, setPaintedFaces, cutPoints, isShiftPressed }) {
+  const [isMouseDown, setIsMouseDown] = useState(false);
 
-  // Yüzey seçme (Click)
+  // Fare ile sürükleyerek boyama (Face painting)
   const handlePointerDown = (e) => {
-    if (isShiftPressed || !isSelecting) return;
+    if (isShiftPressed || !isPainting) return;
     e.stopPropagation();
-
-    if (e.faceIndex !== undefined && model) {
-      const faceIndex = e.faceIndex;
-      
-      setSelectedFaces((prev) => {
-        const exists = prev.includes(faceIndex);
-        let updated;
-        if (exists) {
-          updated = prev.filter(id => id !== faceIndex);
-        } else {
-          updated = [...prev, faceIndex];
-        }
-
-        // Seçilen yüzeylerin merkez noktalarından veya sınırından kement hattı türet
-        updateCutPathFromFaces(updated, model);
-        return updated;
-      });
+    setIsMouseDown(true);
+    if (e.faceIndex !== undefined) {
+      paintFace(e.faceIndex);
     }
   };
 
-  // Seçilen yüzeylerden otomatik kement hattı çıkarma mantığı
-  const updateCutPathFromFaces = (faces, mesh) => {
-    if (faces.length === 0) {
-      setCutPoints([]);
-      return;
+  const handlePointerMove = (e) => {
+    if (!isPainting || !isMouseDown || isShiftPressed) return;
+    if (e.faceIndex !== undefined) {
+      paintFace(e.faceIndex);
     }
+  };
 
-    const geometry = mesh.geometry;
-    const positionAttr = geometry.attributes.position;
-    const points = [];
+  const handlePointerUp = () => {
+    setIsMouseDown(false);
+  };
 
-    // Basitçe seçilen yüzeylerin merkezlerini sırayla birleştiren veya sınır oluşturan hat
-    faces.forEach((fIdx) => {
-      const a = new THREE.Vector3().fromBufferAttribute(positionAttr, fIdx * 3);
-      const b = new THREE.Vector3().fromBufferAttribute(positionAttr, fIdx * 3 + 1);
-      const c = new THREE.Vector3().fromBufferAttribute(positionAttr, fIdx * 3 + 2);
+  const paintFace = (faceIndex) => {
+    if (!model) return;
+    
+    setPaintedFaces((prev) => {
+      if (prev.has(faceIndex)) return prev;
+      const newSet = new Set(prev);
+      newSet.add(faceIndex);
 
-      // Modelin dünya matrisine göre pozisyonu güncelle
-      a.applyMatrix4(mesh.matrixWorld);
-      b.applyMatrix4(mesh.matrixWorld);
-      c.applyMatrix4(mesh.matrixWorld);
+      // Yüzeyi anlık olarak kırmızı renge boya (Vertex colors üzerinden)
+      const geometry = model.geometry;
+      let colorAttr = geometry.attributes.color;
+      
+      if (!colorAttr) {
+        const colors = new Float32Array(geometry.attributes.position.count * 3);
+        colors.fill(0.25); // Varsayılan renk (gri/yeşil tonu)
+        geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+        colorAttr = geometry.attributes.color;
+      }
 
-      const center = new THREE.Vector3().addVectors(a, b).add(c).divideScalar(3);
-      points.push([center.x, center.y, center.z]);
+      // Bu üçgenin 3 köşesini kırmızı yap
+      const i3 = faceIndex * 3;
+      colorAttr.setXYZ(i3, 1, 0, 0);     // Kırmızı
+      colorAttr.setXYZ(i3 + 1, 1, 0, 0); // Kırmızı
+      colorAttr.setXYZ(i3 + 2, 1, 0, 0); // Kırmızı
+      colorAttr.needsUpdate = true;
+
+      return newSet;
     });
-
-    // Eğer yeterli yüzey varsa hattı kapat
-    if (points.length > 2) {
-      points.push(points[0]); // Çevreyi kapat
-    }
-
-    setCutPoints(points);
   };
 
   return (
@@ -76,6 +69,9 @@ function SceneManager({ model, isSelecting, selectedFaces, setSelectedFaces, cut
         <primitive 
           object={model} 
           onPointerDown={handlePointerDown}
+          onPointerMove={handlePointerMove}
+          onPointerUp={handlePointerUp}
+          onPointerOut={handlePointerUp}
         />
       )}
 
@@ -95,8 +91,8 @@ export default function App() {
   const [model, setModel] = useState(null);
   const [pinSize, setPinSize] = useState(5);
   const [pinType, setPinType] = useState('pyramid');
-  const [isSelecting, setIsSelecting] = useState(false);
-  const [selectedFaces, setSelectedFaces] = useState([]);
+  const [isPainting, setIsPainting] = useState(false);
+  const [paintedFaces, setPaintedFaces] = useState(new Set());
   const [cutPoints, setCutPoints] = useState([]);
   const [isWireframe, setIsWireframe] = useState(true);
   const [isShiftPressed, setIsShiftPressed] = useState(false);
@@ -129,16 +125,21 @@ export default function App() {
       geometry.center();
 
       const material = new THREE.MeshStandardMaterial({
-        color: 0x41b883,
+        vertexColors: true,
         roughness: 0.3,
         metalness: 0.1,
         wireframe: true,
         side: THREE.DoubleSide,
       });
 
+      // Başlangıç renklerini ata
+      const colors = new Float32Array(geometry.attributes.position.count * 3);
+      colors.fill(0.3);
+      geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
       const mesh = new THREE.Mesh(geometry, material);
       setModel(mesh);
-      setSelectedFaces([]);
+      setPaintedFaces(new Set());
       setCutPoints([]);
     };
     reader.readAsArrayBuffer(file);
@@ -149,6 +150,94 @@ export default function App() {
       model.material.wireframe = !model.material.wireframe;
       setIsWireframe(model.material.wireframe);
     }
+  };
+
+  // Boyama bittiğinde seçilen yüzeylerin sınır kenarlarını birleştirerek çember oluştur
+  const handleCompletePainting = () => {
+    if (paintedFaces.size === 0 || !model) {
+      alert("Lütfen önce model üzerinde bazı yüzeyleri boyayın.");
+      return;
+    }
+
+    setIsPainting(false);
+    const geometry = model.geometry;
+    const posAttr = geometry.attributes.position;
+    const edgeCounts = new Map();
+
+    const getVertexKey = (x, y, z) => `${x.toFixed(2)},${y.toFixed(2)},${z.toFixed(2)}`;
+
+    // Boyanan her yüzeyin 3 kenarını say
+    paintedFaces.forEach((fIdx) => {
+      const i3 = fIdx * 3;
+      const vA = new THREE.Vector3(posAttr.getX(i3), posAttr.getY(i3), posAttr.getZ(i3)).applyMatrix4(model.matrixWorld);
+      const vB = new THREE.Vector3(posAttr.getX(i3 + 1), posAttr.getY(i3 + 1), posAttr.getZ(i3 + 1)).applyMatrix4(model.matrixWorld);
+      const vC = new THREE.Vector3(posAttr.getX(i3 + 2), posAttr.getY(i3 + 2), posAttr.getZ(i3 + 2)).applyMatrix4(model.matrixWorld);
+
+      const edges = [
+        [vA, vB],
+        [vB, vC],
+        [vC, vA]
+      ];
+
+      edges.forEach(([p1, p2]) => {
+        const k1 = getVertexKey(p1.x, p1.y, p1.z);
+        const k2 = getVertexKey(p2.x, p2.y, p2.z);
+        const edgeKey = k1 < k2 ? `${k1}_${k2}` : `${k2}_${k1}`;
+
+        if (!edgeCounts.has(edgeKey)) {
+          edgeCounts.set(edgeKey, { count: 0, p1, p2 });
+        }
+        edgeCounts.get(edgeKey).count += 1;
+      });
+    });
+
+    // Sadece 1 kez kullanılan kenarlar dış sınır (boundary) kenarlarıdır
+    const boundarySegments = [];
+    edgeCounts.forEach((data) => {
+      if (data.count === 1) {
+        boundarySegments.push([
+          [data.p1.x, data.p1.y, data.p1.z],
+          [data.p2.x, data.p2.y, data.p2.z]
+        ]);
+      }
+    });
+
+    if (boundarySegments.length === 0) {
+      alert("Geçerli bir sınır hattı oluşturulamadı. Lütfen daha belirgin bir bölge boyayın.");
+      return;
+    }
+
+    // Sınır segmentlerini birbirine bağlayarak sıralı bir çember (loop) haline getir
+    const orderedPoints = [];
+    let currentSeg = boundarySegments.pop();
+    orderedPoints.push(currentSeg[0], currentSeg[1]);
+
+    while (boundarySegments.length > 0) {
+      const lastPoint = orderedPoints[orderedPoints.length - 1];
+      const nextIdx = boundarySegments.findIndex(seg => {
+        const d1 = Math.hypot(seg[0][0] - lastPoint[0], seg[0][1] - lastPoint[1], seg[0][2] - lastPoint[2]);
+        const d2 = Math.hypot(seg[1][0] - lastPoint[0], seg[1][1] - lastPoint[1], seg[1][2] - lastPoint[2]);
+        return d1 < 0.5 || d2 < 0.5;
+      });
+
+      if (nextIdx === -1) break;
+
+      const [s1, s2] = boundarySegments.splice(nextIdx, 1)[0];
+      const d1 = Math.hypot(s1[0] - lastPoint[0], s1[1] - lastPoint[1], s1[2] - lastPoint[2]);
+      
+      if (d1 < 0.5) {
+        orderedPoints.push(s2);
+      } else {
+        orderedPoints.push(s1);
+      }
+    }
+
+    // Çemberi kapatmak için ilk noktayı sona ekle
+    if (orderedPoints.length > 0) {
+      orderedPoints.push(orderedPoints[0]);
+    }
+
+    setCutPoints(orderedPoints);
   };
 
   return (
@@ -200,7 +289,7 @@ export default function App() {
                 type="range" 
                 min="2" 
                 max="15" 
-                value= {pinSize} 
+                value={pinSize} 
                 onChange={(e) => setPinSize(Number(e.target.value))}
                 className="w-full accent-emerald-400 cursor-pointer"
               />
@@ -208,20 +297,25 @@ export default function App() {
 
             <button 
               onClick={() => {
-                setIsSelecting(!isSelecting);
-                if (isSelecting) {
-                  setSelectedFaces([]);
-                  setCutPoints([]);
-                }
+                setIsPainting(!isPainting);
               }}
-              className={`py-2 px-4 rounded font-medium transition ${isSelecting ? 'bg-amber-600 hover:bg-amber-700' : 'bg-emerald-600 hover:bg-emerald-700'} text-white shadow flex items-center justify-center gap-2`}
+              className={`py-2 px-4 rounded font-medium transition ${isPainting ? 'bg-amber-600 hover:bg-amber-700' : 'bg-emerald-600 hover:bg-emerald-700'} text-white shadow flex items-center justify-center gap-2`}
             >
-              <CheckSquare className="w-4 h-4" />
-              {isSelecting ? 'Yüzey Seçimini Kapat' : 'Yüzey Seçerek Kesim Başlat'}
+              <Brush className="w-4 h-4" />
+              {isPainting ? 'Boyama Modu Açık (Kapat)' : 'Yüzey Boyama Modunu Başlat'}
             </button>
 
+            {isPainting && (
+              <button 
+                onClick={handleCompletePainting}
+                className="flex items-center justify-center gap-2 bg-purple-600 hover:bg-purple-700 text-white py-2 px-4 rounded font-medium transition shadow animate-pulse"
+              >
+                <CheckCircle className="w-4 h-4" /> Boyamayı Tamamla (Kement Oluştur)
+              </button>
+            )}
+
             <button 
-              onClick={() => alert(`Seçilen ${selectedFaces.length} yüzey üzerinden kesim hattı ve pinler oluşturuluyor...`)}
+              onClick={() => alert(`Oluşan kement hattı üzerinden model parçalara ayrılıyor ve pinler ekleniyor...`)}
               className="mt-2 flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 text-white py-2 px-4 rounded font-medium transition shadow"
             >
               <Download className="w-4 h-4" /> Parçaları STL Olarak İndir
@@ -235,19 +329,18 @@ export default function App() {
         <Canvas camera={{ position: [0, 0, 150], fov: 50 }}>
           <SceneManager 
             model={model} 
-            isSelecting={isSelecting} 
-            selectedFaces={selectedFaces} 
-            setSelectedFaces={setSelectedFaces}
+            isPainting={isPainting} 
+            paintedFaces={paintedFaces} 
+            setPaintedFaces={setPaintedFaces}
             cutPoints={cutPoints} 
-            setCutPoints={setCutPoints} 
             isShiftPressed={isShiftPressed}
           />
-          <OrbitControls makeDefault enableRotate={!isSelecting || isShiftPressed} />
+          <OrbitControls makeDefault enableRotate={!isPainting || isShiftPressed} />
         </Canvas>
 
-        {isSelecting && (
+        {isPainting && (
           <div className="absolute top-4 right-4 bg-amber-500/20 border border-amber-500 text-amber-300 px-4 py-2 rounded-lg text-sm backdrop-blur-md shadow-lg flex items-center gap-2">
-            <span>🔲 Yüzey Seçim Modu: İstediğiniz yüzeylere tıklayarak etrafında kement hattı oluşturun. Kamerayı döndürmek için <b>Shift</b> tuşuna basılı tutun.</span>
+            <span>🎨 Boyama Modu Aktif: Sol tuşa basılı tutarak kesmek istediğiniz bölgeyi boyayın. Kamerayı döndürmek için <b>Shift</b> tuşunu kullanın.</span>
           </div>
         )}
       </div>
