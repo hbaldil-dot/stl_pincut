@@ -3,24 +3,24 @@ import * as THREE from 'three';
 import { STLLoader } from 'three/examples/jsm/loaders/STLLoader';
 import { Canvas, useThree } from '@react-three/fiber';
 import { OrbitControls, Line } from '@react-three/drei';
-import { Scissors, Download, Upload, Sliders, Eye, Brush, CheckCircle } from 'lucide-react';
+import { Scissors, Download, Upload, Sliders, Eye, Brush, CheckCircle, Undo2 } from 'lucide-react';
 
-function SceneManager({ model, isPainting, paintedFaces, setPaintedFaces, cutPoints, isShiftPressed }) {
+function SceneManager({ model, isPainting, paintedFaces, setPaintedFaces, cutPoints, isShiftPressed, history, setHistory }) {
   const [isMouseDown, setIsMouseDown] = useState(false);
 
   const handlePointerDown = (e) => {
     if (isShiftPressed || !isPainting) return;
     e.stopPropagation();
     setIsMouseDown(true);
-    if (e.faceIndex !== undefined) {
-      paintFace(e.faceIndex);
+    if (e.faceIndex !== undefined && e.point) {
+      paintArea(e.point);
     }
   };
 
   const handlePointerMove = (e) => {
     if (!isPainting || !isMouseDown || isShiftPressed) return;
-    if (e.faceIndex !== undefined) {
-      paintFace(e.faceIndex);
+    if (e.faceIndex !== undefined && e.point) {
+      paintArea(e.point);
     }
   };
 
@@ -28,32 +28,59 @@ function SceneManager({ model, isPainting, paintedFaces, setPaintedFaces, cutPoi
     setIsMouseDown(false);
   };
 
-  const paintFace = (faceIndex) => {
+  // Kalın fırça etkisi: Dokunulan 3D noktaya yakın olan komşu yüzeyleri de boya
+  const paintArea = (hitPoint) => {
     if (!model) return;
-    
-    setPaintedFaces((prev) => {
-      if (prev.has(faceIndex)) return prev;
-      const newSet = new Set(prev);
-      newSet.add(faceIndex);
+    const geometry = model.geometry;
+    const posAttr = geometry.attributes.position;
+    const newlyPainted = [];
 
-      const geometry = model.geometry;
-      let colorAttr = geometry.attributes.color;
-      
-      if (!colorAttr) {
-        const colors = new Float32Array(geometry.attributes.position.count * 3);
-        colors.fill(0.3);
-        geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-        colorAttr = geometry.attributes.color;
+    const brushRadius = 4.5; // Fırça kalınlığı (düzenlenebilir)
+
+    // Tüm yüzeyleri tarayıp tıklanan noktaya yakın olanları bul
+    const faceCount = posAttr.count / 3;
+    for (let i = 0; i < faceCount; i++) {
+      const i3 = i * 3;
+      const vA = new THREE.Vector3(posAttr.getX(i3), posAttr.getY(i3), posAttr.getZ(i3)).applyMatrix4(model.matrixWorld);
+      const vB = new THREE.Vector3(posAttr.getX(i3 + 1), posAttr.getY(i3 + 1), posAttr.getZ(i3 + 1)).applyMatrix4(model.matrixWorld);
+      const vC = new THREE.Vector3(posAttr.getX(i3 + 2), posAttr.getY(i3 + 2), posAttr.getZ(i3 + 2)).applyMatrix4(model.matrixWorld);
+
+      const center = new THREE.Vector3().addVectors(vA, vB).add(vC).divideScalar(3);
+
+      if (center.distanceTo(hitPoint) <= brushRadius) {
+        if (!paintedFaces.has(i)) {
+          newlyPainted.push(i);
+        }
       }
+    }
 
-      const i3 = faceIndex * 3;
-      colorAttr.setXYZ(i3, 1, 0, 0);
-      colorAttr.setXYZ(i3 + 1, 1, 0, 0);
-      colorAttr.setXYZ(i3 + 2, 1, 0, 0);
-      colorAttr.needsUpdate = true;
+    if (newlyPainted.length > 0) {
+      // Undo için mevcut durumu geçmişe kaydet
+      setHistory((prev) => [...prev, new Set(paintedFaces)]);
 
-      return newSet;
-    });
+      setPaintedFaces((prev) => {
+        const newSet = new Set(prev);
+        let colorAttr = geometry.attributes.color;
+
+        if (!colorAttr) {
+          const colors = new Float32Array(posAttr.count * 3);
+          colors.fill(0.3);
+          geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+          colorAttr = geometry.attributes.color;
+        }
+
+        newlyPainted.forEach((faceIndex) => {
+          newSet.add(faceIndex);
+          const i3 = faceIndex * 3;
+          colorAttr.setXYZ(i3, 1, 0, 0);     // Kırmızı
+          colorAttr.setXYZ(i3 + 1, 1, 0, 0); // Kırmızı
+          colorAttr.setXYZ(i3 + 2, 1, 0, 0); // Kırmızı
+        });
+
+        colorAttr.needsUpdate = true;
+        return newSet;
+      });
+    }
   };
 
   return (
@@ -72,7 +99,7 @@ function SceneManager({ model, isPainting, paintedFaces, setPaintedFaces, cutPoi
         />
       )}
 
-      {/* Spline Eğrisi ile Pürüzsüz Kement Hattı */}
+      {/* Spline Eğrisi Kement Hattı */}
       {cutPoints.length > 1 && (
         <Line
           points={cutPoints}
@@ -91,6 +118,7 @@ export default function App() {
   const [pinType, setPinType] = useState('pyramid');
   const [isPainting, setIsPainting] = useState(false);
   const [paintedFaces, setPaintedFaces] = useState(new Set());
+  const [history, setHistory] = useState([]);
   const [cutPoints, setCutPoints] = useState([]);
   const [isWireframe, setIsWireframe] = useState(true);
   const [isShiftPressed, setIsShiftPressed] = useState(false);
@@ -137,6 +165,7 @@ export default function App() {
       const mesh = new THREE.Mesh(geometry, material);
       setModel(mesh);
       setPaintedFaces(new Set());
+      setHistory([]);
       setCutPoints([]);
     };
     reader.readAsArrayBuffer(file);
@@ -149,7 +178,34 @@ export default function App() {
     }
   };
 
-  // Boyama bittiğinde sınır hatlarını bul, Spline eğrisi ile pürüzsüzleştir ve çembere dönüştür
+  // Geri Al (Undo) Fonksiyonu
+  const handleUndo = () => {
+    if (history.length === 0 || !model) return;
+
+    const previousFaces = history[history.length - 1];
+    setHistory((prev) => prev.slice(0, prev.length - 1));
+    setPaintedFaces(previousFaces);
+
+    // Renkleri sıfırla ve kalanları tekrar kırmızı yap
+    const geometry = model.geometry;
+    const colorAttr = geometry.attributes.color;
+    const count = geometry.attributes.position.count;
+
+    for (let i = 0; i < count; i++) {
+      colorAttr.setXYZ(i, 0.3, 0.3, 0.3);
+    }
+
+    previousFaces.forEach((fIdx) => {
+      const i3 = fIdx * 3;
+      colorAttr.setXYZ(i3, 1, 0, 0);
+      colorAttr.setXYZ(i3 + 1, 1, 0, 0);
+      colorAttr.setXYZ(i3 + 2, 1, 0, 0);
+    });
+    colorAttr.needsUpdate = true;
+    setCutPoints([]);
+  };
+
+  // Boyama tamamlandığında pürüzsüz Spline kement oluşturma
   const handleCompletePainting = () => {
     if (paintedFaces.size === 0 || !model) {
       alert("Lütfen önce model üzerinde bazı yüzeyleri boyayın.");
@@ -161,7 +217,7 @@ export default function App() {
     const posAttr = geometry.attributes.position;
     const edgeCounts = new Map();
 
-    const getVertexKey = (x, y, z) => `${x.toFixed(2)},${y.toFixed(2)},${z.toFixed(2)}`;
+    const getVertexKey = (x, y, z) => `${x.toFixed(1)},${y.toFixed(1)},${z.toFixed(1)}`;
 
     paintedFaces.forEach((fIdx) => {
       const i3 = fIdx * 3;
@@ -195,7 +251,6 @@ export default function App() {
       return;
     }
 
-    // Segmentleri sıralı bir zincir haline getir
     const orderedVectors = [];
     let currentSeg = boundarySegments.pop();
     orderedVectors.push(currentSeg[0], currentSeg[1]);
@@ -203,13 +258,13 @@ export default function App() {
     while (boundarySegments.length > 0) {
       const lastPoint = orderedVectors[orderedVectors.length - 1];
       const nextIdx = boundarySegments.findIndex(seg => 
-        seg[0].distanceTo(lastPoint) < 0.5 || seg[1].distanceTo(lastPoint) < 0.5
+        seg[0].distanceTo(lastPoint) < 1.0 || seg[1].distanceTo(lastPoint) < 1.0
       );
 
       if (nextIdx === -1) break;
 
       const [s1, s2] = boundarySegments.splice(nextIdx, 1)[0];
-      if (s1.distanceTo(lastPoint) < 0.5) {
+      if (s1.distanceTo(lastPoint) < 1.0) {
         orderedVectors.push(s2);
       } else {
         orderedVectors.push(s1);
@@ -218,10 +273,9 @@ export default function App() {
 
     if (orderedVectors.length < 3) return;
 
-    // --- SPLINE EĞRİSİ OLUŞTURMA ---
-    // CatmullRomCurve3 kullanarak sert köşeleri pürüzsüz eğriye çeviriyoruz
-    const curve = new THREE.CatmullRomCurve3(orderedVectors, true, 'catmullrom', 0.5);
-    const sampledPoints = curve.getPoints(100); // 100 ara nokta ile akıcı hat
+    // CatmullRomCurve3 ile kusursuz pürüzsüz spline eğrisi
+    const curve = new THREE.CatmullRomCurve3(orderedVectors, true, 'centripetal', 0.5);
+    const sampledPoints = curve.getPoints(150);
 
     const formattedPoints = sampledPoints.map(v => [v.x, v.y, v.z]);
     setCutPoints(formattedPoints);
@@ -282,13 +336,24 @@ export default function App() {
               />
             </div>
 
-            <button 
-              onClick={() => setIsPainting(!isPainting)}
-              className={`py-2 px-4 rounded font-medium transition ${isPainting ? 'bg-amber-600 hover:bg-amber-700' : 'bg-emerald-600 hover:bg-emerald-700'} text-white shadow flex items-center justify-center gap-2`}
-            >
-              <Brush className="w-4 h-4" />
-              {isPainting ? 'Boyama Modu Açık (Kapat)' : 'Yüzey Boyama Modunu Başlat'}
-            </button>
+            <div className="flex gap-2">
+              <button 
+                onClick={() => setIsPainting(!isPainting)}
+                className={`flex-1 py-2 px-3 rounded font-medium transition ${isPainting ? 'bg-amber-600 hover:bg-amber-700' : 'bg-emerald-600 hover:bg-emerald-700'} text-white shadow flex items-center justify-center gap-2 text-sm`}
+              >
+                <Brush className="w-4 h-4" />
+                {isPainting ? 'Boyamayı Kapat' : 'Boyamayı Başlat'}
+              </button>
+
+              <button 
+                onClick={handleUndo}
+                disabled={history.length === 0}
+                className="bg-gray-800 hover:bg-gray-700 disabled:opacity-50 text-gray-200 py-2 px-3 rounded font-medium transition border border-gray-700 flex items-center justify-center text-sm"
+                title="Geri Al"
+              >
+                <Undo2 className="w-4 h-4" />
+              </button>
+            </div>
 
             {isPainting && (
               <button 
@@ -319,13 +384,15 @@ export default function App() {
             setPaintedFaces={setPaintedFaces}
             cutPoints={cutPoints} 
             isShiftPressed={isShiftPressed}
+            history={history}
+            setHistory={setHistory}
           />
           <OrbitControls makeDefault enableRotate={!isPainting || isShiftPressed} />
         </Canvas>
 
         {isPainting && (
           <div className="absolute top-4 right-4 bg-amber-500/20 border border-amber-500 text-amber-300 px-4 py-2 rounded-lg text-sm backdrop-blur-md shadow-lg flex items-center gap-2">
-            <span>🎨 Boyama Aktif: Bölgeyi boyayıp "Boyamayı Tamamla" butonuna basın. Kamerayı döndürmek için <b>Shift</b> kullanın.</span>
+            <span>🎨 Kalın Fırça Aktif: İstediğiniz bölgeyi fırçalayın. Yanlış yaparsanız <b>Geri Al</b> butonunu kullanabilirsiniz.</span>
           </div>
         )}
       </div>
