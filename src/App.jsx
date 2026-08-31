@@ -6,16 +6,17 @@ import { OrbitControls, Line } from '@react-three/drei';
 import { Scissors, Download, Upload, Sliders, Eye } from 'lucide-react';
 
 function SceneManager({ model, isDrawing, cutPoints, setCutPoints, isShiftPressed }) {
-  const { raycaster, camera, pointer } = useThree();
+  const [isMouseDown, setIsMouseDown] = useState(false);
 
   const handlePointerDown = (e) => {
-    if (isShiftPressed) return; // Shift basılıysa çizim yapma, kamera dönsün
+    if (isShiftPressed || !isDrawing) return;
     e.stopPropagation();
+    setIsMouseDown(true);
     setCutPoints([[e.point.x, e.point.y, e.point.z]]);
   };
 
   const handlePointerMove = (e) => {
-    if (!isDrawing || isShiftPressed) return; // Fare basılı değilse veya Shift basılıysa çizme
+    if (!isDrawing || !isMouseDown || isShiftPressed) return;
     const newPoint = [e.point.x, e.point.y, e.point.z];
     
     setCutPoints((prev) => {
@@ -29,6 +30,10 @@ function SceneManager({ model, isDrawing, cutPoints, setCutPoints, isShiftPresse
     });
   };
 
+  const handlePointerUp = () => {
+    setIsMouseDown(false);
+  };
+
   return (
     <>
       <ambientLight intensity={0.8} />
@@ -40,6 +45,8 @@ function SceneManager({ model, isDrawing, cutPoints, setCutPoints, isShiftPresse
           object={model} 
           onPointerDown={handlePointerDown}
           onPointerMove={handlePointerMove}
+          onPointerUp={handlePointerUp}
+          onPointerOut={handlePointerUp}
         />
       )}
 
@@ -64,7 +71,6 @@ export default function App() {
   const [isWireframe, setIsWireframe] = useState(true);
   const [isShiftPressed, setIsShiftPressed] = useState(false);
 
-  // Klavye olayları (Shift tuşunu algılamak için)
   useEffect(() => {
     const handleKeyDown = (e) => {
       if (e.key === 'Shift') setIsShiftPressed(true);
@@ -116,20 +122,18 @@ export default function App() {
   const handleCompleteCut = () => {
     setIsDrawing(false);
     if (cutPoints.length > 2) {
-      // Çevreyi kapatmak için ilk noktayı ekle
       setCutPoints((prev) => [...prev, prev[0]]);
     }
   };
 
   return (
     <div className="flex h-screen w-screen bg-gray-950 text-white font-sans overflow-hidden">
-      {/* Sol Panel: Araçlar ve Ayarlar */}
+      {/* Sol Panel */}
       <div className="w-80 bg-gray-900 border-r border-gray-800 flex flex-col p-5 shadow-2xl z-10 overflow-y-auto">
         <h1 className="text-xl font-bold mb-6 flex items-center gap-2 text-emerald-400">
           <Scissors className="w-6 h-6" /> STL PinCut 3D
         </h1>
 
-        {/* Dosya Yükleme */}
         <div className="mb-6">
           <label className="block text-sm font-medium mb-2 text-gray-300">STL Modeli Yükle</label>
           <label className="flex flex-col items-center justify-center border-2 border-dashed border-gray-700 rounded-lg p-4 cursor-pointer hover:border-emerald-400 transition bg-gray-950/50">
@@ -139,10 +143,9 @@ export default function App() {
           </label>
         </div>
 
-        {/* Kesim ve Pin Ayarları */}
         {model && (
           <div className="flex flex-col gap-4 border-t border-gray-800 pt-4">
-            <h2 className="text-md font-semibold text-gray-200 flex items-2 gap-2">
+            <h2 className="text-md font-semibold text-gray-200 flex items-center gap-2">
               <Sliders className="w-4 h-4" /> Kesim ve Pin Yapılandırması
             </h2>
 
@@ -198,7 +201,7 @@ export default function App() {
         )}
       </div>
 
-      {/* Sağ Panel: Tam Ekran 3D Görüntüleme Alanı */}
+      {/* Sağ Panel: 3D Alan */}
       <div className="flex-1 relative bg-gradient-to-br from-gray-950 via-gray-900 to-black h-full">
         <Canvas camera={{ position: [0, 0, 150], fov: 50 }}>
           <SceneManager 
@@ -208,13 +211,12 @@ export default function App() {
             setCutPoints={setCutPoints} 
             isShiftPressed={isShiftPressed}
           />
-          {/* Shift basılıyken kamera dönebilir, değilse çizim modunda kamera kilitlenir */}
           <OrbitControls makeDefault enableRotate={!isDrawing || isShiftPressed} />
         </Canvas>
 
         {isDrawing && (
           <div className="absolute top-4 right-4 bg-amber-500/20 border border-amber-500 text-amber-300 px-4 py-2 rounded-lg text-sm backdrop-blur-md shadow-lg flex items-center gap-2">
-            <span>✏️ Kement Aktif: Model üzerinde sol klikle çizim yapın. Kamerayı döndürmek için <b>Shift</b> tuşuna basılı tutun.</span>
+            <span>✏️ Kement Aktif: Sol tuşa basılı tutarak sürükleyin. Kamerayı döndürmek için <b>Shift</b> tuşunu kullanın.</span>
           </div>
         )}
       </div>
