@@ -1,24 +1,28 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import * as THREE from 'three';
 import { STLLoader } from 'three/examples/jsm/loaders/STLLoader';
 import { Canvas, useThree } from '@react-three/fiber';
 import { OrbitControls, Line } from '@react-three/drei';
 import { Scissors, Download, Upload, Sliders, Eye } from 'lucide-react';
 
-function SceneManager({ model, isCutting, cutPoints, setCutPoints, isWireframe }) {
-  const { camera, raycaster, pointer } = useThree();
+function SceneManager({ model, isDrawing, cutPoints, setCutPoints, isShiftPressed }) {
+  const { raycaster, camera, pointer } = useThree();
 
-  // Model üzerindeyken fare hareketiyle noktaları kaydet
+  const handlePointerDown = (e) => {
+    if (isShiftPressed) return; // Shift basılıysa çizim yapma, kamera dönsün
+    e.stopPropagation();
+    setCutPoints([[e.point.x, e.point.y, e.point.z]]);
+  };
+
   const handlePointerMove = (e) => {
-    if (!isCutting) return;
+    if (!isDrawing || isShiftPressed) return; // Fare basılı değilse veya Shift basılıysa çizme
     const newPoint = [e.point.x, e.point.y, e.point.z];
     
-    // Çok sık nokta eklenmesini önlemek için son noktaya olan mesafeye bakabiliriz
     setCutPoints((prev) => {
       if (prev.length === 0) return [newPoint];
       const last = prev[prev.length - 1];
       const dist = Math.hypot(last[0] - newPoint[0], last[1] - newPoint[1], last[2] - newPoint[2]);
-      if (dist > 1.5) { // Hassasiyet eşiği
+      if (dist > 1.2) {
         return [...prev, newPoint];
       }
       return prev;
@@ -34,7 +38,8 @@ function SceneManager({ model, isCutting, cutPoints, setCutPoints, isWireframe }
       {model && (
         <primitive 
           object={model} 
-          onPointerMove={handlePointerMove} 
+          onPointerDown={handlePointerDown}
+          onPointerMove={handlePointerMove}
         />
       )}
 
@@ -54,9 +59,27 @@ export default function App() {
   const [model, setModel] = useState(null);
   const [pinSize, setPinSize] = useState(5);
   const [pinType, setPinType] = useState('pyramid');
-  const [isCutting, setIsCutting] = useState(false);
+  const [isDrawing, setIsDrawing] = useState(false);
   const [cutPoints, setCutPoints] = useState([]);
   const [isWireframe, setIsWireframe] = useState(true);
+  const [isShiftPressed, setIsShiftPressed] = useState(false);
+
+  // Klavye olayları (Shift tuşunu algılamak için)
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if (e.key === 'Shift') setIsShiftPressed(true);
+    };
+    const handleKeyUp = (e) => {
+      if (e.key === 'Shift') setIsShiftPressed(false);
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('keyup', handleKeyUp);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('keyup', handleKeyUp);
+    };
+  }, []);
 
   const handleFileUpload = (event) => {
     const file = event.target.files[0];
@@ -73,7 +96,7 @@ export default function App() {
         color: 0x41b883,
         roughness: 0.3,
         metalness: 0.1,
-        wireframe: true, // Başlangıçta wireframe olarak gelsin
+        wireframe: true,
       });
 
       const mesh = new THREE.Mesh(geometry, material);
@@ -83,7 +106,6 @@ export default function App() {
     reader.readAsArrayBuffer(file);
   };
 
-  // Wireframe modunu açıp kapatma
   const toggleWireframe = () => {
     if (model) {
       model.material.wireframe = !model.material.wireframe;
@@ -91,11 +113,10 @@ export default function App() {
     }
   };
 
-  // Çizimi tamamla ve başlangıç noktasıyla birleştirerek çevreyi kapat
   const handleCompleteCut = () => {
-    setIsCutting(false);
+    setIsDrawing(false);
     if (cutPoints.length > 2) {
-      // Çevreyi kapatmak için ilk noktayı sona ekle (En kısa yol mantığıyla döngü oluşturur)
+      // Çevreyi kapatmak için ilk noktayı ekle
       setCutPoints((prev) => [...prev, prev[0]]);
     }
   };
@@ -121,7 +142,7 @@ export default function App() {
         {/* Kesim ve Pin Ayarları */}
         {model && (
           <div className="flex flex-col gap-4 border-t border-gray-800 pt-4">
-            <h2 className="text-md font-semibold text-gray-200 flex items-center gap-2">
+            <h2 className="text-md font-semibold text-gray-200 flex items-2 gap-2">
               <Sliders className="w-4 h-4" /> Kesim ve Pin Yapılandırması
             </h2>
 
@@ -159,16 +180,12 @@ export default function App() {
 
             <button 
               onClick={() => {
-                if (!isCutting) {
-                  setCutPoints([]);
-                  setIsCutting(true);
-                } else {
-                  handleCompleteCut();
-                }
+                setIsDrawing(!isDrawing);
+                if (!isDrawing) setCutPoints([]);
               }}
-              className={`py-2 px-4 rounded font-medium transition ${isCutting ? 'bg-amber-600 hover:bg-amber-700' : 'bg-emerald-600 hover:bg-emerald-700'} text-white shadow`}
+              className={`py-2 px-4 rounded font-medium transition ${isDrawing ? 'bg-amber-600 hover:bg-amber-700' : 'bg-emerald-600 hover:bg-emerald-700'} text-white shadow`}
             >
-              {isCutting ? 'Çevreyi Kapat / Kesimi Bitir' : 'Serbest Kement Çizimi Başlat'}
+              {isDrawing ? 'Çevreyi Kapat / Kesimi Bitir' : 'Serbest Kement Modunu Aç'}
             </button>
 
             <button 
@@ -186,17 +203,18 @@ export default function App() {
         <Canvas camera={{ position: [0, 0, 150], fov: 50 }}>
           <SceneManager 
             model={model} 
-            isCutting={isCutting} 
+            isDrawing={isDrawing} 
             cutPoints={cutPoints} 
             setCutPoints={setCutPoints} 
-            isWireframe={isWireframe}
+            isShiftPressed={isShiftPressed}
           />
-          <OrbitControls makeDefault enableRotate={!isCutting} />
+          {/* Shift basılıyken kamera dönebilir, değilse çizim modunda kamera kilitlenir */}
+          <OrbitControls makeDefault enableRotate={!isDrawing || isShiftPressed} />
         </Canvas>
 
-        {isCutting && (
-          <div className="absolute top-4 right-4 bg-amber-500/20 border border-amber-500 text-amber-300 px-4 py-2 rounded-lg text-sm backdrop-blur-md shadow-lg animate-pulse">
-            ✏️ Kement Modu Aktif: Model üzerinde sürükleyerek çevre çizgisi çizin, bitince butona basın.
+        {isDrawing && (
+          <div className="absolute top-4 right-4 bg-amber-500/20 border border-amber-500 text-amber-300 px-4 py-2 rounded-lg text-sm backdrop-blur-md shadow-lg flex items-center gap-2">
+            <span>✏️ Kement Aktif: Model üzerinde sol klikle çizim yapın. Kamerayı döndürmek için <b>Shift</b> tuşuna basılı tutun.</span>
           </div>
         )}
       </div>
