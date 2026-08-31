@@ -3,35 +3,67 @@ import * as THREE from 'three';
 import { STLLoader } from 'three/examples/jsm/loaders/STLLoader';
 import { Canvas, useThree } from '@react-three/fiber';
 import { OrbitControls, Line } from '@react-three/drei';
-import { Scissors, Download, Upload, Sliders, Eye } from 'lucide-react';
+import { Scissors, Download, Upload, Sliders, Eye, CheckSquare } from 'lucide-react';
 
-function SceneManager({ model, isDrawing, cutPoints, setCutPoints, isShiftPressed }) {
-  const [isMouseDown, setIsMouseDown] = useState(false);
+function SceneManager({ model, isSelecting, selectedFaces, setSelectedFaces, cutPoints, setCutPoints, isShiftPressed }) {
+  const [hoveredFace, setHoveredFace] = useState(null);
 
+  // Yüzey seçme (Click)
   const handlePointerDown = (e) => {
-    if (isShiftPressed || !isDrawing) return;
+    if (isShiftPressed || !isSelecting) return;
     e.stopPropagation();
-    setIsMouseDown(true);
-    setCutPoints([[e.point.x, e.point.y, e.point.z]]);
+
+    if (e.faceIndex !== undefined && model) {
+      const faceIndex = e.faceIndex;
+      
+      setSelectedFaces((prev) => {
+        const exists = prev.includes(faceIndex);
+        let updated;
+        if (exists) {
+          updated = prev.filter(id => id !== faceIndex);
+        } else {
+          updated = [...prev, faceIndex];
+        }
+
+        // Seçilen yüzeylerin merkez noktalarından veya sınırından kement hattı türet
+        updateCutPathFromFaces(updated, model);
+        return updated;
+      });
+    }
   };
 
-  const handlePointerMove = (e) => {
-    if (!isDrawing || !isMouseDown || isShiftPressed) return;
-    const newPoint = [e.point.x, e.point.y, e.point.z];
-    
-    setCutPoints((prev) => {
-      if (prev.length === 0) return [newPoint];
-      const last = prev[prev.length - 1];
-      const dist = Math.hypot(last[0] - newPoint[0], last[1] - newPoint[1], last[2] - newPoint[2]);
-      if (dist > 1.2) {
-        return [...prev, newPoint];
-      }
-      return prev;
+  // Seçilen yüzeylerden otomatik kement hattı çıkarma mantığı
+  const updateCutPathFromFaces = (faces, mesh) => {
+    if (faces.length === 0) {
+      setCutPoints([]);
+      return;
+    }
+
+    const geometry = mesh.geometry;
+    const positionAttr = geometry.attributes.position;
+    const points = [];
+
+    // Basitçe seçilen yüzeylerin merkezlerini sırayla birleştiren veya sınır oluşturan hat
+    faces.forEach((fIdx) => {
+      const a = new THREE.Vector3().fromBufferAttribute(positionAttr, fIdx * 3);
+      const b = new THREE.Vector3().fromBufferAttribute(positionAttr, fIdx * 3 + 1);
+      const c = new THREE.Vector3().fromBufferAttribute(positionAttr, fIdx * 3 + 2);
+
+      // Modelin dünya matrisine göre pozisyonu güncelle
+      a.applyMatrix4(mesh.matrixWorld);
+      b.applyMatrix4(mesh.matrixWorld);
+      c.applyMatrix4(mesh.matrixWorld);
+
+      const center = new THREE.Vector3().addVectors(a, b).add(c).divideScalar(3);
+      points.push([center.x, center.y, center.z]);
     });
-  };
 
-  const handlePointerUp = () => {
-    setIsMouseDown(false);
+    // Eğer yeterli yüzey varsa hattı kapat
+    if (points.length > 2) {
+      points.push(points[0]); // Çevreyi kapat
+    }
+
+    setCutPoints(points);
   };
 
   return (
@@ -44,13 +76,10 @@ function SceneManager({ model, isDrawing, cutPoints, setCutPoints, isShiftPresse
         <primitive 
           object={model} 
           onPointerDown={handlePointerDown}
-          onPointerMove={handlePointerMove}
-          onPointerUp={handlePointerUp}
-          onPointerOut={handlePointerUp}
         />
       )}
 
-      {/* Kement / Kesim Çevresi Çizgisi */}
+      {/* Oluşan Kement / Kesim Çevresi Çizgisi */}
       {cutPoints.length > 1 && (
         <Line
           points={cutPoints}
@@ -66,7 +95,8 @@ export default function App() {
   const [model, setModel] = useState(null);
   const [pinSize, setPinSize] = useState(5);
   const [pinType, setPinType] = useState('pyramid');
-  const [isDrawing, setIsDrawing] = useState(false);
+  const [isSelecting, setIsSelecting] = useState(false);
+  const [selectedFaces, setSelectedFaces] = useState([]);
   const [cutPoints, setCutPoints] = useState([]);
   const [isWireframe, setIsWireframe] = useState(true);
   const [isShiftPressed, setIsShiftPressed] = useState(false);
@@ -103,10 +133,12 @@ export default function App() {
         roughness: 0.3,
         metalness: 0.1,
         wireframe: true,
+        side: THREE.DoubleSide,
       });
 
       const mesh = new THREE.Mesh(geometry, material);
       setModel(mesh);
+      setSelectedFaces([]);
       setCutPoints([]);
     };
     reader.readAsArrayBuffer(file);
@@ -116,13 +148,6 @@ export default function App() {
     if (model) {
       model.material.wireframe = !model.material.wireframe;
       setIsWireframe(model.material.wireframe);
-    }
-  };
-
-  const handleCompleteCut = () => {
-    setIsDrawing(false);
-    if (cutPoints.length > 2) {
-      setCutPoints((prev) => [...prev, prev[0]]);
     }
   };
 
@@ -175,7 +200,7 @@ export default function App() {
                 type="range" 
                 min="2" 
                 max="15" 
-                value={pinSize} 
+                value= {pinSize} 
                 onChange={(e) => setPinSize(Number(e.target.value))}
                 className="w-full accent-emerald-400 cursor-pointer"
               />
@@ -183,16 +208,20 @@ export default function App() {
 
             <button 
               onClick={() => {
-                setIsDrawing(!isDrawing);
-                if (!isDrawing) setCutPoints([]);
+                setIsSelecting(!isSelecting);
+                if (isSelecting) {
+                  setSelectedFaces([]);
+                  setCutPoints([]);
+                }
               }}
-              className={`py-2 px-4 rounded font-medium transition ${isDrawing ? 'bg-amber-600 hover:bg-amber-700' : 'bg-emerald-600 hover:bg-emerald-700'} text-white shadow`}
+              className={`py-2 px-4 rounded font-medium transition ${isSelecting ? 'bg-amber-600 hover:bg-amber-700' : 'bg-emerald-600 hover:bg-emerald-700'} text-white shadow flex items-center justify-center gap-2`}
             >
-              {isDrawing ? 'Çevreyi Kapat / Kesimi Bitir' : 'Serbest Kement Modunu Aç'}
+              <CheckSquare className="w-4 h-4" />
+              {isSelecting ? 'Yüzey Seçimini Kapat' : 'Yüzey Seçerek Kesim Başlat'}
             </button>
 
             <button 
-              onClick={() => alert("Kement çevresi işlendi. Model iki parçaya bölünüp pin yuvaları oluşturuluyor...")}
+              onClick={() => alert(`Seçilen ${selectedFaces.length} yüzey üzerinden kesim hattı ve pinler oluşturuluyor...`)}
               className="mt-2 flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 text-white py-2 px-4 rounded font-medium transition shadow"
             >
               <Download className="w-4 h-4" /> Parçaları STL Olarak İndir
@@ -206,17 +235,19 @@ export default function App() {
         <Canvas camera={{ position: [0, 0, 150], fov: 50 }}>
           <SceneManager 
             model={model} 
-            isDrawing={isDrawing} 
+            isSelecting={isSelecting} 
+            selectedFaces={selectedFaces} 
+            setSelectedFaces={setSelectedFaces}
             cutPoints={cutPoints} 
             setCutPoints={setCutPoints} 
             isShiftPressed={isShiftPressed}
           />
-          <OrbitControls makeDefault enableRotate={!isDrawing || isShiftPressed} />
+          <OrbitControls makeDefault enableRotate={!isSelecting || isShiftPressed} />
         </Canvas>
 
-        {isDrawing && (
+        {isSelecting && (
           <div className="absolute top-4 right-4 bg-amber-500/20 border border-amber-500 text-amber-300 px-4 py-2 rounded-lg text-sm backdrop-blur-md shadow-lg flex items-center gap-2">
-            <span>✏️ Kement Aktif: Sol tuşa basılı tutarak sürükleyin. Kamerayı döndürmek için <b>Shift</b> tuşunu kullanın.</span>
+            <span>🔲 Yüzey Seçim Modu: İstediğiniz yüzeylere tıklayarak etrafında kement hattı oluşturun. Kamerayı döndürmek için <b>Shift</b> tuşuna basılı tutun.</span>
           </div>
         )}
       </div>
