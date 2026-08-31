@@ -8,7 +8,6 @@ import { Scissors, Download, Upload, Sliders, Eye, Brush, CheckCircle } from 'lu
 function SceneManager({ model, isPainting, paintedFaces, setPaintedFaces, cutPoints, isShiftPressed }) {
   const [isMouseDown, setIsMouseDown] = useState(false);
 
-  // Fare ile sürükleyerek boyama (Face painting)
   const handlePointerDown = (e) => {
     if (isShiftPressed || !isPainting) return;
     e.stopPropagation();
@@ -37,22 +36,20 @@ function SceneManager({ model, isPainting, paintedFaces, setPaintedFaces, cutPoi
       const newSet = new Set(prev);
       newSet.add(faceIndex);
 
-      // Yüzeyi anlık olarak kırmızı renge boya (Vertex colors üzerinden)
       const geometry = model.geometry;
       let colorAttr = geometry.attributes.color;
       
       if (!colorAttr) {
         const colors = new Float32Array(geometry.attributes.position.count * 3);
-        colors.fill(0.25); // Varsayılan renk (gri/yeşil tonu)
+        colors.fill(0.3);
         geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
         colorAttr = geometry.attributes.color;
       }
 
-      // Bu üçgenin 3 köşesini kırmızı yap
       const i3 = faceIndex * 3;
-      colorAttr.setXYZ(i3, 1, 0, 0);     // Kırmızı
-      colorAttr.setXYZ(i3 + 1, 1, 0, 0); // Kırmızı
-      colorAttr.setXYZ(i3 + 2, 1, 0, 0); // Kırmızı
+      colorAttr.setXYZ(i3, 1, 0, 0);
+      colorAttr.setXYZ(i3 + 1, 1, 0, 0);
+      colorAttr.setXYZ(i3 + 2, 1, 0, 0);
       colorAttr.needsUpdate = true;
 
       return newSet;
@@ -75,12 +72,13 @@ function SceneManager({ model, isPainting, paintedFaces, setPaintedFaces, cutPoi
         />
       )}
 
-      {/* Oluşan Kement / Kesim Çevresi Çizgisi */}
+      {/* Spline Eğrisi ile Pürüzsüz Kement Hattı */}
       {cutPoints.length > 1 && (
         <Line
           points={cutPoints}
           color="yellow"
           lineWidth={4}
+          closed={true}
         />
       )}
     </>
@@ -132,7 +130,6 @@ export default function App() {
         side: THREE.DoubleSide,
       });
 
-      // Başlangıç renklerini ata
       const colors = new Float32Array(geometry.attributes.position.count * 3);
       colors.fill(0.3);
       geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
@@ -152,7 +149,7 @@ export default function App() {
     }
   };
 
-  // Boyama bittiğinde seçilen yüzeylerin sınır kenarlarını birleştirerek çember oluştur
+  // Boyama bittiğinde sınır hatlarını bul, Spline eğrisi ile pürüzsüzleştir ve çembere dönüştür
   const handleCompletePainting = () => {
     if (paintedFaces.size === 0 || !model) {
       alert("Lütfen önce model üzerinde bazı yüzeyleri boyayın.");
@@ -166,18 +163,13 @@ export default function App() {
 
     const getVertexKey = (x, y, z) => `${x.toFixed(2)},${y.toFixed(2)},${z.toFixed(2)}`;
 
-    // Boyanan her yüzeyin 3 kenarını say
     paintedFaces.forEach((fIdx) => {
       const i3 = fIdx * 3;
       const vA = new THREE.Vector3(posAttr.getX(i3), posAttr.getY(i3), posAttr.getZ(i3)).applyMatrix4(model.matrixWorld);
       const vB = new THREE.Vector3(posAttr.getX(i3 + 1), posAttr.getY(i3 + 1), posAttr.getZ(i3 + 1)).applyMatrix4(model.matrixWorld);
       const vC = new THREE.Vector3(posAttr.getX(i3 + 2), posAttr.getY(i3 + 2), posAttr.getZ(i3 + 2)).applyMatrix4(model.matrixWorld);
 
-      const edges = [
-        [vA, vB],
-        [vB, vC],
-        [vC, vA]
-      ];
+      const edges = [[vA, vB], [vB, vC], [vC, vA]];
 
       edges.forEach(([p1, p2]) => {
         const k1 = getVertexKey(p1.x, p1.y, p1.z);
@@ -191,53 +183,48 @@ export default function App() {
       });
     });
 
-    // Sadece 1 kez kullanılan kenarlar dış sınır (boundary) kenarlarıdır
     const boundarySegments = [];
     edgeCounts.forEach((data) => {
       if (data.count === 1) {
-        boundarySegments.push([
-          [data.p1.x, data.p1.y, data.p1.z],
-          [data.p2.x, data.p2.y, data.p2.z]
-        ]);
+        boundarySegments.push([data.p1, data.p2]);
       }
     });
 
     if (boundarySegments.length === 0) {
-      alert("Geçerli bir sınır hattı oluşturulamadı. Lütfen daha belirgin bir bölge boyayın.");
+      alert("Geçerli bir sınır hattı oluşturulamadı.");
       return;
     }
 
-    // Sınır segmentlerini birbirine bağlayarak sıralı bir çember (loop) haline getir
-    const orderedPoints = [];
+    // Segmentleri sıralı bir zincir haline getir
+    const orderedVectors = [];
     let currentSeg = boundarySegments.pop();
-    orderedPoints.push(currentSeg[0], currentSeg[1]);
+    orderedVectors.push(currentSeg[0], currentSeg[1]);
 
     while (boundarySegments.length > 0) {
-      const lastPoint = orderedPoints[orderedPoints.length - 1];
-      const nextIdx = boundarySegments.findIndex(seg => {
-        const d1 = Math.hypot(seg[0][0] - lastPoint[0], seg[0][1] - lastPoint[1], seg[0][2] - lastPoint[2]);
-        const d2 = Math.hypot(seg[1][0] - lastPoint[0], seg[1][1] - lastPoint[1], seg[1][2] - lastPoint[2]);
-        return d1 < 0.5 || d2 < 0.5;
-      });
+      const lastPoint = orderedVectors[orderedVectors.length - 1];
+      const nextIdx = boundarySegments.findIndex(seg => 
+        seg[0].distanceTo(lastPoint) < 0.5 || seg[1].distanceTo(lastPoint) < 0.5
+      );
 
       if (nextIdx === -1) break;
 
       const [s1, s2] = boundarySegments.splice(nextIdx, 1)[0];
-      const d1 = Math.hypot(s1[0] - lastPoint[0], s1[1] - lastPoint[1], s1[2] - lastPoint[2]);
-      
-      if (d1 < 0.5) {
-        orderedPoints.push(s2);
+      if (s1.distanceTo(lastPoint) < 0.5) {
+        orderedVectors.push(s2);
       } else {
-        orderedPoints.push(s1);
+        orderedVectors.push(s1);
       }
     }
 
-    // Çemberi kapatmak için ilk noktayı sona ekle
-    if (orderedPoints.length > 0) {
-      orderedPoints.push(orderedPoints[0]);
-    }
+    if (orderedVectors.length < 3) return;
 
-    setCutPoints(orderedPoints);
+    // --- SPLINE EĞRİSİ OLUŞTURMA ---
+    // CatmullRomCurve3 kullanarak sert köşeleri pürüzsüz eğriye çeviriyoruz
+    const curve = new THREE.CatmullRomCurve3(orderedVectors, true, 'catmullrom', 0.5);
+    const sampledPoints = curve.getPoints(100); // 100 ara nokta ile akıcı hat
+
+    const formattedPoints = sampledPoints.map(v => [v.x, v.y, v.z]);
+    setCutPoints(formattedPoints);
   };
 
   return (
@@ -296,9 +283,7 @@ export default function App() {
             </div>
 
             <button 
-              onClick={() => {
-                setIsPainting(!isPainting);
-              }}
+              onClick={() => setIsPainting(!isPainting)}
               className={`py-2 px-4 rounded font-medium transition ${isPainting ? 'bg-amber-600 hover:bg-amber-700' : 'bg-emerald-600 hover:bg-emerald-700'} text-white shadow flex items-center justify-center gap-2`}
             >
               <Brush className="w-4 h-4" />
@@ -310,12 +295,12 @@ export default function App() {
                 onClick={handleCompletePainting}
                 className="flex items-center justify-center gap-2 bg-purple-600 hover:bg-purple-700 text-white py-2 px-4 rounded font-medium transition shadow animate-pulse"
               >
-                <CheckCircle className="w-4 h-4" /> Boyamayı Tamamla (Kement Oluştur)
+                <CheckCircle className="w-4 h-4" /> Boyamayı Tamamla (Spline Kement)
               </button>
             )}
 
             <button 
-              onClick={() => alert(`Oluşan kement hattı üzerinden model parçalara ayrılıyor ve pinler ekleniyor...`)}
+              onClick={() => alert(`Spline kement hattı onaylandı. Parçalar ayrılıyor ve pimler ekleniyor...`)}
               className="mt-2 flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 text-white py-2 px-4 rounded font-medium transition shadow"
             >
               <Download className="w-4 h-4" /> Parçaları STL Olarak İndir
@@ -340,7 +325,7 @@ export default function App() {
 
         {isPainting && (
           <div className="absolute top-4 right-4 bg-amber-500/20 border border-amber-500 text-amber-300 px-4 py-2 rounded-lg text-sm backdrop-blur-md shadow-lg flex items-center gap-2">
-            <span>🎨 Boyama Modu Aktif: Sol tuşa basılı tutarak kesmek istediğiniz bölgeyi boyayın. Kamerayı döndürmek için <b>Shift</b> tuşunu kullanın.</span>
+            <span>🎨 Boyama Aktif: Bölgeyi boyayıp "Boyamayı Tamamla" butonuna basın. Kamerayı döndürmek için <b>Shift</b> kullanın.</span>
           </div>
         )}
       </div>
