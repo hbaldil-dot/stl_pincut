@@ -48,9 +48,7 @@ function SceneManager({ model, isPainting, paintedFaces, setPaintedFaces, cutPoi
 
       const center = new THREE.Vector3().addVectors(vA, vB).add(vC).divideScalar(3);
 
-      // Fırça yarıçapı kontrolü
       if (center.distanceTo(hitPoint) <= brushSize) {
-        // Yüzeyin normale bakış açısı kontrolü (Sadece kameraya bakan ön yüzler boyansın, arkadakiler boyanmasın)
         if (normalAttr) {
           const nA = new THREE.Vector3(normalAttr.getX(i3), normalAttr.getY(i3), normalAttr.getZ(i3));
           const nB = new THREE.Vector3(normalAttr.getX(i3+1), normalAttr.getY(i3+1), normalAttr.getZ(i3+1));
@@ -59,11 +57,8 @@ function SceneManager({ model, isPainting, paintedFaces, setPaintedFaces, cutPoi
           faceNormal.transformDirection(model.matrixWorld);
 
           const toCameraDir = new THREE.Vector3().subVectors(cameraDir, center).normalize();
-          // Eğer yüzey kameraya bakıyorsa (açı uygunsa) boyamaya ekle
-          if (faceNormal.dot(toCameraDir) > -0.2) {
-            if (!paintedFaces.has(i)) {
-              newlyPainted.push(i);
-            }
+          if (faceNormal.dot(toCameraDir) > -0.1) {
+            if (!paintedFaces.has(i)) newlyPainted.push(i);
           }
         } else {
           if (!paintedFaces.has(i)) newlyPainted.push(i);
@@ -88,9 +83,9 @@ function SceneManager({ model, isPainting, paintedFaces, setPaintedFaces, cutPoi
         newlyPainted.forEach((faceIndex) => {
           newSet.add(faceIndex);
           const i3 = faceIndex * 3;
-          colorAttr.setXYZ(i3, 1, 0, 0);     // Kırmızı
-          colorAttr.setXYZ(i3 + 1, 1, 0, 0); // Kırmızı
-          colorAttr.setXYZ(i3 + 2, 1, 0, 0); // Kırmızı
+          colorAttr.setXYZ(i3, 1, 0, 0);
+          colorAttr.setXYZ(i3 + 1, 1, 0, 0);
+          colorAttr.setXYZ(i3 + 2, 1, 0, 0);
         });
 
         colorAttr.needsUpdate = true;
@@ -115,7 +110,6 @@ function SceneManager({ model, isPainting, paintedFaces, setPaintedFaces, cutPoi
         />
       )}
 
-      {/* Pürüzsüz Spline Kement Hattı */}
       {cutPoints.length > 1 && (
         <Line
           points={cutPoints}
@@ -172,7 +166,7 @@ export default function App() {
         roughness: 0.3,
         metalness: 0.1,
         wireframe: true,
-        side: THREE.FrontSide, // Sadece ön yüzlerin görünmesi çakışmaları engeller
+        side: THREE.FrontSide,
       });
 
       const colors = new Float32Array(geometry.attributes.position.count * 3);
@@ -220,9 +214,10 @@ export default function App() {
     setCutPoints([]);
   };
 
+  // Kusursuz Çember / Kesit Hattı Üreten Radyal Algoritma
   const handleCompletePainting = () => {
     if (paintedFaces.size === 0 || !model) {
-      alert("Lütfen önce model üzerinde bazı yüzeyleri boyayın.");
+      alert("Lütfen önce model üzerinde çevre hatlarını boyayın.");
       return;
     }
 
@@ -230,8 +225,7 @@ export default function App() {
     const geometry = model.geometry;
     const posAttr = geometry.attributes.position;
     const edgeCounts = new Map();
-
-    const getVertexKey = (x, y, z) => `${x.toFixed(1)},${y.toFixed(1)},${z.toFixed(1)}`;
+    const getVertexKey = (x, y, z) => `${x.toFixed(2)},${y.toFixed(2)},${z.toFixed(2)}`;
 
     paintedFaces.forEach((fIdx) => {
       const i3 = fIdx * 3;
@@ -240,7 +234,6 @@ export default function App() {
       const vC = new THREE.Vector3(posAttr.getX(i3 + 2), posAttr.getY(i3 + 2), posAttr.getZ(i3 + 2)).applyMatrix4(model.matrixWorld);
 
       const edges = [[vA, vB], [vB, vC], [vC, vA]];
-
       edges.forEach(([p1, p2]) => {
         const k1 = getVertexKey(p1.x, p1.y, p1.z);
         const k2 = getVertexKey(p2.x, p2.y, p2.z);
@@ -253,56 +246,46 @@ export default function App() {
       });
     });
 
-    const boundarySegments = [];
+    const boundaryPoints = [];
     edgeCounts.forEach((data) => {
       if (data.count === 1) {
-        boundarySegments.push([data.p1, data.p2]);
+        boundaryPoints.push(data.p1, data.p2);
       }
     });
 
-    if (boundarySegments.length === 0) {
-      alert("Geçerli bir sınır hattı oluşturulamadı.");
+    if (boundaryPoints.length === 0) {
+      alert("Sınır noktaları bulunamadı.");
       return;
     }
 
-    const orderedVectors = [];
-    let currentSeg = boundarySegments.pop();
-    orderedVectors.push(currentSeg[0], currentSeg[1]);
-
-    while (boundarySegments.length > 0) {
-      const lastPoint = orderedVectors[orderedVectors.length - 1];
-      const nextIdx = boundarySegments.findIndex(seg => 
-        seg[0].distanceTo(lastPoint) < 1.5 || seg[1].distanceTo(lastPoint) < 1.5
-      );
-
-      if (nextIdx === -1) break;
-
-      const [s1, s2] = boundarySegments.splice(nextIdx, 1)[0];
-      if (s1.distanceTo(lastPoint) < 1.5) {
-        orderedVectors.push(s2);
-      } else {
-        orderedVectors.push(s1);
+    // Benzersiz sınır noktalarını al
+    const uniquePoints = [];
+    const addedKeys = new Set();
+    boundaryPoints.forEach(p => {
+      const key = getVertexKey(p.x, p.y, p.z);
+      if (!addedKeys.has(key)) {
+        addedKeys.add(key);
+        uniquePoints.push(p.clone());
       }
-    }
+    });
 
-    if (orderedVectors.length < 3) return;
+    // Merkez noktayı hesapla
+    const center = new THREE.Vector3();
+    uniquePoints.forEach(p => center.add(p));
+    center.divideScalar(uniquePoints.size);
 
-    const simplified = [orderedVectors[0]];
-    for (let i = 1; i < orderedVectors.length; i++) {
-      if (orderedVectors[i].distanceTo(simplified[simplified.length - 1]) > 1.5) {
-        simplified.push(orderedVectors[i]);
-      }
-    }
+    // Noktaları merkeze göre açısal (radyal) olarak sırala (Kusursuz çember formu sağlar)
+    // Referans düzlem olarak X ve Z eksenlerini kullanalım
+    uniquePoints.sort((a, b) => {
+      const angleA = Math.atan2(a.z - center.z, a.x - center.x);
+      const angleB = Math.atan2(b.z - center.z, b.x - center.x);
+      return angleA - angleB;
+    });
 
-    if (simplified.length < 3) {
-      simplified.push(orderedVectors[Math.floor(orderedVectors.length / 2)]);
-    }
+    const curve = new THREE.CatmullRomCurve3(uniquePoints, true, 'catmullrom', 0.2);
+    const sampledPoints = curve.getPoints(150);
 
-    const curve = new THREE.CatmullRomCurve3(simplified, true, 'catmullrom', 0.3);
-    const sampledPoints = curve.getPoints(200);
-
-    const formattedPoints = sampledPoints.map(v => [v.x, v.y, v.z]);
-    setCutPoints(formattedPoints);
+    setCutPoints(sampledPoints.map(v => [v.x, v.y, v.z]));
   };
 
   return (
@@ -325,7 +308,7 @@ export default function App() {
         {model && (
           <div className="flex flex-col gap-4 border-t border-gray-800 pt-4">
             <h2 className="text-md font-semibold text-gray-200 flex items-center gap-2">
-              <Sliders className="w-4 h-4" /> Kesim و Pin Yapılandırması
+              <Sliders className="w-4 h-4" /> Kesim ve Pin Yapılandırması
             </h2>
 
             <button 
@@ -429,7 +412,7 @@ export default function App() {
 
         {isPainting && (
           <div className="absolute top-4 right-4 bg-amber-500/20 border border-amber-500 text-amber-300 px-4 py-2 rounded-lg text-sm backdrop-blur-md shadow-lg flex items-center gap-2">
-            <span>🎨 Arka yüzeylerin boyanması engellendi. Artık sadece kameraya bakan ön yüzler boyanıyor.</span>
+            <span>🎨 Radyal sıralama aktif: Boyadığınız alanın etrafında düzgün bir çember/halka kement oluşacaktır.</span>
           </div>
         )}
       </div>
