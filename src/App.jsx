@@ -1,291 +1,362 @@
-import React, { useState, useEffect, useRef, useMemo } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import * as THREE from 'three';
-import { STLLoader } from 'three/examples/jsm/loaders/STLLoader';
-import { Canvas, useThree } from '@react-three/fiber';
-import { OrbitControls, Line } from '@react-three/drei';
-import { 
-  Scissors, Download, Upload, Sliders, Eye, Brush, CheckCircle, 
-  Undo2, RotateCcw, Box, Sparkles, Layers, Check, AlertCircle, ChevronDown
+import { Viewport3D } from './components/Viewport3D';
+import { ControlsPanel } from './components/ControlsPanel';
+import { ModelInspector } from './components/ModelInspector';
+import { ExportModal } from './components/ExportModal';
+import { HistoryPanel } from './components/HistoryPanel';
+import { MeshListPanel } from './components/MeshListPanel';
+import { loadSamplePreset, parseCustomSTL, MATERIAL_THEMES } from './utils/stlLoaderHelper';
+import { sliceMeshWithPlane, sliceMeshWithLasso } from './utils/meshSlicer';
+import { createWorkspaceSnapshot, restoreWorkspaceSnapshot } from './utils/historyManager';
+import {
+  downloadMeshSTL,
+  downloadCombinedSTL,
+  downloadAllPartsZip,
+  calculateGeometryStats
+} from './utils/stlExporter';
+import {
+  Download,
+  Scissors,
+  Layers,
+  FolderArchive,
+  Sparkles,
+  Sliders,
+  CheckCircle2,
+  X,
+  FileDown,
+  Ruler,
+  Undo2,
+  Redo2,
+  History
 } from 'lucide-react';
 
-// Procedural Sample Models
-function generateSampleGeometry(type) {
-  let geometry;
-  if (type === 'bracket') {
-    // Mechanical Bracket
-    const shape = new THREE.Shape();
-    shape.moveTo(-25, -25);
-    shape.lineTo(25, -25);
-    shape.lineTo(25, -10);
-    shape.lineTo(-10, -10);
-    shape.lineTo(-10, 25);
-    shape.lineTo(-25, 25);
-    shape.closePath();
-    const extrudeSettings = { depth: 30, bevelEnabled: true, bevelSegments: 2, steps: 1, bevelSize: 1.5, bevelThickness: 1.5 };
-    geometry = new THREE.ExtrudeGeometry(shape, extrudeSettings);
-  } else if (type === 'cylinder') {
-    // Stepped Cylinder Joint
-    const lathePoints = [];
-    lathePoints.push(new THREE.Vector2(0, -30));
-    lathePoints.push(new THREE.Vector2(14, -30));
-    lathePoints.push(new THREE.Vector2(14, -8));
-    lathePoints.push(new THREE.Vector2(22, -8));
-    lathePoints.push(new THREE.Vector2(22, 8));
-    lathePoints.push(new THREE.Vector2(14, 8));
-    lathePoints.push(new THREE.Vector2(14, 30));
-    lathePoints.push(new THREE.Vector2(0, 30));
-    geometry = new THREE.LatheGeometry(lathePoints, 24);
-  } else if (type === 'prism') {
-    // Hexagonal Prism
-    geometry = new THREE.CylinderGeometry(20, 20, 45, 6);
-  } else {
-    // Default: Low-poly Figurine / Sculpture
-    const lathePoints = [
-      new THREE.Vector2(0, -35),
-      new THREE.Vector2(20, -35),
-      new THREE.Vector2(24, -28),
-      new THREE.Vector2(18, -20),
-      new THREE.Vector2(14, -10),
-      new THREE.Vector2(19, 2),
-      new THREE.Vector2(11, 14),
-      new THREE.Vector2(15, 22),
-      new THREE.Vector2(16, 30),
-      new THREE.Vector2(11, 35),
-      new THREE.Vector2(0, 38)
-    ];
-    geometry = new THREE.LatheGeometry(lathePoints, 16);
-  }
+export function App() {
+  // Model state
+  const [model, setModel] = useState(null);
+  const [modelName, setModelName] = useState('Stanford Bunny');
+  const [modelInfo, setModelInfo] = useState(null);
+  const [faceCount, setFaceCount] = useState(0);
+  const [isLoadingFile, setIsLoadingFile] = useState(false);
+  const [statusMessage, setStatusMessage] = useState('Stanford Bunny yüklendi.');
 
-  geometry.center();
-  geometry.computeVertexNormals();
-  return geometry;
-}
+  // Modes: 'plane' (interactive clipping plane) | 'lasso' (freeform curve)
+  const [activeMode, setActiveMode] = useState('plane');
 
-// STL Binary Exporter Function
-function exportBinarySTL(geometry, name = 'model') {
-  const posAttr = geometry.attributes.position;
-  const normalAttr = geometry.attributes.normal;
-  const numFaces = posAttr.count / 3;
+  // Interactive Clipping Plane Configuration
+  const [clippingConfig, setClippingConfig] = useState({
+    enabled: true,
+    axis: 'y', // 'x' | 'y' | 'z' | 'custom'
+    offset: 0,
+    rotX: 0,
+    rotY: 0,
+    rotZ: 0,
+    negate: false,
+    showPlaneHelper: true,
+    addPinOnSlice: true,
+    normal: new THREE.Vector3(0, 1, 0)
+  });
 
-  const bufferSize = 84 + numFaces * 50;
-  const buffer = new ArrayBuffer(bufferSize);
-  const dataView = new DataView(buffer);
+  // Lasso Painting / Freehand points
+  const [isDrawing, setIsDrawing] = useState(false);
+  const [drawnPoints, setDrawnPoints] = useState([]);
+  const [isLoopClosed, setIsLoopClosed] = useState(false);
+  const [loopPoints, setLoopPoints] = useState([]);
+  const [isShiftPressed, setIsShiftPressed] = useState(false);
 
-  // 80-byte header
-  const header = `STL PinCut 3D - Exported ${name}`;
-  for (let i = 0; i < 80; i++) {
-    dataView.setUint8(i, i < header.length ? header.charCodeAt(i) : 0x20);
-  }
+  // Alignment Pin & Hole Configuration
+  const [pinConfig, setPinConfig] = useState({
+    mode: 'pin_and_hole', // 'pin_and_hole' | 'holes_both' | 'hole_only' | 'pin_only' | 'flat'
+    diameter: 8.0,
+    size: 8.0,
+    depth: 10.0,
+    height: 10.0,
+    clearance: 0.2, // mm 3D print fit tolerance
+    type: 'cylinder', // 'cylinder' | 'pyramid' | 'hex'
+    taper: 0.85
+  });
 
-  // 4-byte face count (little endian)
-  dataView.setUint32(80, numFaces, true);
+  // Model 3D Rotation & Alignment State
+  const [modelRotation, setModelRotation] = useState({ x: 0, y: 0, z: 0 });
+  const [isRotateGizmoActive, setIsRotateGizmoActive] = useState(false);
+  const [snapAngle, setSnapAngle] = useState(null);
 
-  let offset = 84;
-  for (let i = 0; i < numFaces; i++) {
-    const i3 = i * 3;
-    // Normal
-    const nx = normalAttr ? normalAttr.getX(i3) : 0;
-    const ny = normalAttr ? normalAttr.getY(i3) : 0;
-    const nz = normalAttr ? normalAttr.getZ(i3) : 1;
-    dataView.setFloat32(offset, nx, true);
-    dataView.setFloat32(offset + 4, ny, true);
-    dataView.setFloat32(offset + 8, nz, true);
-    offset += 12;
+  // Sliced Meshes & Exploded View
+  const [splitResult, setSplitResult] = useState(null);
+  const [explodedDistance, setExplodedDistance] = useState(15);
 
-    // 3 Vertices
-    for (let v = 0; v < 3; v++) {
-      const vx = posAttr.getX(i3 + v);
-      const vy = posAttr.getY(i3 + v);
-      const vz = posAttr.getZ(i3 + v);
-      dataView.setFloat32(offset, vx, true);
-      dataView.setFloat32(offset + 4, vy, true);
-      dataView.setFloat32(offset + 8, vz, true);
-      offset += 12;
-    }
+  // Measurement Tool State
+  const [isMeasureActive, setIsMeasureActive] = useState(false);
+  const [measurePointA, setMeasurePointA] = useState(null);
+  const [measurePointB, setMeasurePointB] = useState(null);
 
-    // 2-byte attribute byte count
-    dataView.setUint16(offset, 0, true);
-    offset += 2;
-  }
+  // Viewport Settings
+  const [isWireframe, setIsWireframe] = useState(false);
+  const [materialTheme, setMaterialTheme] = useState(MATERIAL_THEMES[0]);
+  const [showGrid, setShowGrid] = useState(true);
+  const [showBoundingBox, setShowBoundingBox] = useState(false);
+  const [autoRotate, setAutoRotate] = useState(false);
+  const [isInspectorOpen, setIsInspectorOpen] = useState(false);
+  const [isMeshListOpen, setIsMeshListOpen] = useState(false);
+  const [isExportModalOpen, setIsExportModalOpen] = useState(false);
+  const [showPostCutBanner, setShowPostCutBanner] = useState(false);
 
-  const blob = new Blob([buffer], { type: 'application/octet-stream' });
-  const link = document.createElement('a');
-  link.href = URL.createObjectURL(blob);
-  link.download = `${name.replace(/\s+/g, '_')}.stl`;
-  link.click();
-}
+  // Per-Mesh display & material customization configs
+  // Map of meshId -> { visible: boolean, wireframe: boolean, opacity: number, materialTheme: object|null, customColor: string|null }
+  const [meshConfigs, setMeshConfigs] = useState({
+    mainModel: { visible: true, wireframe: false, opacity: 1.0, materialTheme: null, customColor: null },
+    partA: { visible: true, wireframe: false, opacity: 1.0, materialTheme: null, customColor: null },
+    partB: { visible: true, wireframe: false, opacity: 1.0, materialTheme: null, customColor: null },
+    dowelPin: { visible: true, wireframe: false, opacity: 1.0, materialTheme: null, customColor: null }
+  });
 
-function SceneManager({ 
-  model, 
-  splitMeshes,
-  explodedDistance,
-  isPainting, 
-  paintedFaces, 
-  setPaintedFaces, 
-  cutPoints, 
-  isShiftPressed, 
-  brushSize, 
-  setHistory 
-}) {
-  const [isMouseDown, setIsMouseDown] = useState(false);
-  const { camera } = useThree();
+  // Undo / Redo / History State
+  const [history, setHistory] = useState([]);
+  const [historyIndex, setHistoryIndex] = useState(-1);
+  const [isHistoryOpen, setIsHistoryOpen] = useState(false);
+  const isRestoringRef = useRef(false);
+  const lastActionTimeRef = useRef(0);
 
-  const handlePointerDown = (e) => {
-    if (isShiftPressed || !isPainting) return;
-    e.stopPropagation();
-    setIsMouseDown(true);
-    if (e.faceIndex !== undefined && e.point) {
-      paintArea(e.point);
-    }
-  };
+  const controlsRef = useRef(null);
 
-  const handlePointerMove = (e) => {
-    if (!isPainting || !isMouseDown || isShiftPressed) return;
-    if (e.faceIndex !== undefined && e.point) {
-      paintArea(e.point);
-    }
-  };
+  /**
+   * Pushes a new snapshot onto the Undo/Redo history stack
+   */
+  const pushHistory = (description, type, overrides = {}) => {
+    if (isRestoringRef.current) return;
 
-  const handlePointerUp = () => {
-    setIsMouseDown(false);
-  };
+    const snapshot = createWorkspaceSnapshot({
+      description,
+      type,
+      modelRotation: overrides.modelRotation !== undefined ? overrides.modelRotation : modelRotation,
+      splitResult: overrides.splitResult !== undefined ? overrides.splitResult : splitResult,
+      pinConfig: overrides.pinConfig !== undefined ? overrides.pinConfig : pinConfig,
+      clippingConfig: overrides.clippingConfig !== undefined ? overrides.clippingConfig : clippingConfig,
+      drawnPoints: overrides.drawnPoints !== undefined ? overrides.drawnPoints : drawnPoints,
+      isLoopClosed: overrides.isLoopClosed !== undefined ? overrides.isLoopClosed : isLoopClosed,
+      loopPoints: overrides.loopPoints !== undefined ? overrides.loopPoints : loopPoints,
+      measurePointA: overrides.measurePointA !== undefined ? overrides.measurePointA : measurePointA,
+      measurePointB: overrides.measurePointB !== undefined ? overrides.measurePointB : measurePointB,
+      isMeasureActive: overrides.isMeasureActive !== undefined ? overrides.isMeasureActive : isMeasureActive,
+      activeMode: overrides.activeMode !== undefined ? overrides.activeMode : activeMode,
+      explodedDistance: overrides.explodedDistance !== undefined ? overrides.explodedDistance : explodedDistance
+    });
 
-  const paintArea = (hitPoint) => {
-    if (!model) return;
-    const geometry = model.geometry;
-    const posAttr = geometry.attributes.position;
-    const normalAttr = geometry.attributes.normal;
-    const newlyPainted = [];
+    setHistory((prev) => {
+      const currentIdx = historyIndex;
+      const truncated = prev.slice(0, currentIdx + 1);
 
-    const faceCount = posAttr.count / 3;
-    const cameraDir = new THREE.Vector3();
-    camera.getWorldPosition(cameraDir);
-
-    for (let i = 0; i < faceCount; i++) {
-      const i3 = i * 3;
-      const vA = new THREE.Vector3(posAttr.getX(i3), posAttr.getY(i3), posAttr.getZ(i3)).applyMatrix4(model.matrixWorld);
-      const vB = new THREE.Vector3(posAttr.getX(i3 + 1), posAttr.getY(i3 + 1), posAttr.getZ(i3 + 1)).applyMatrix4(model.matrixWorld);
-      const vC = new THREE.Vector3(posAttr.getX(i3 + 2), posAttr.getY(i3 + 2), posAttr.getZ(i3 + 2)).applyMatrix4(model.matrixWorld);
-
-      const center = new THREE.Vector3().addVectors(vA, vB).add(vC).divideScalar(3);
-
-      if (center.distanceTo(hitPoint) <= brushSize) {
-        if (normalAttr) {
-          const nA = new THREE.Vector3(normalAttr.getX(i3), normalAttr.getY(i3), normalAttr.getZ(i3));
-          const nB = new THREE.Vector3(normalAttr.getX(i3+1), normalAttr.getY(i3+1), normalAttr.getZ(i3+1));
-          const nC = new THREE.Vector3(normalAttr.getX(i3+2), normalAttr.getY(i3+2), normalAttr.getZ(i3+2));
-          const faceNormal = new THREE.Vector3().add(nA).add(nB).add(nC).normalize();
-          faceNormal.transformDirection(model.matrixWorld);
-
-          const toCameraDir = new THREE.Vector3().subVectors(cameraDir, center).normalize();
-          if (faceNormal.dot(toCameraDir) > -0.1) {
-            if (!paintedFaces.has(i)) newlyPainted.push(i);
-          }
-        } else {
-          if (!paintedFaces.has(i)) newlyPainted.push(i);
-        }
+      // Debounce continuous slider changes (e.g. diameter, rotation, offset)
+      const last = truncated[truncated.length - 1];
+      const now = Date.now();
+      if (
+        last &&
+        last.type === type &&
+        (type === 'PIN_CONFIG' || type === 'CLIPPING_CONFIG' || type === 'EXPLODED_DISTANCE' || type === 'MODEL_ROTATE') &&
+        now - lastActionTimeRef.current < 900
+      ) {
+        lastActionTimeRef.current = now;
+        truncated[truncated.length - 1] = snapshot;
+        return truncated;
       }
+
+      lastActionTimeRef.current = now;
+      const next = [...truncated, snapshot];
+      if (next.length > 50) next.shift();
+      return next;
+    });
+
+    setHistoryIndex((prev) => {
+      const nextIdx = Math.min(prev + 1, 49);
+      return nextIdx;
+    });
+  };
+
+  /**
+   * Restores a full workspace snapshot
+   */
+  const applySnapshot = (snapshot, toastMsg) => {
+    if (!snapshot) return;
+    isRestoringRef.current = true;
+    const restored = restoreWorkspaceSnapshot(snapshot);
+    if (!restored) {
+      isRestoringRef.current = false;
+      return;
     }
 
-    if (newlyPainted.length > 0) {
-      setHistory((prev) => [...prev, new Set(paintedFaces)]);
+    if (restored.modelRotation) {
+      setModelRotation(restored.modelRotation);
+    }
+    setSplitResult(restored.splitResult);
+    setPinConfig(restored.pinConfig);
+    setClippingConfig(restored.clippingConfig);
+    setDrawnPoints(restored.drawnPoints);
+    setIsLoopClosed(restored.isLoopClosed);
+    setLoopPoints(restored.loopPoints);
+    setMeasurePointA(restored.measurePointA);
+    setMeasurePointB(restored.measurePointB);
+    setIsMeasureActive(restored.isMeasureActive);
+    setActiveMode(restored.activeMode);
+    setExplodedDistance(restored.explodedDistance);
 
-      setPaintedFaces((prev) => {
-        const newSet = new Set(prev);
-        let colorAttr = geometry.attributes.color;
+    if (restored.splitResult) {
+      setShowPostCutBanner(true);
+    } else {
+      setShowPostCutBanner(false);
+    }
 
-        if (!colorAttr) {
-          const colors = new Float32Array(posAttr.count * 3);
-          colors.fill(0.3);
-          geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-          colorAttr = geometry.attributes.color;
-        }
+    if (toastMsg) {
+      setStatusMessage(toastMsg);
+    }
 
-        newlyPainted.forEach((faceIndex) => {
-          newSet.add(faceIndex);
-          const i3 = faceIndex * 3;
-          colorAttr.setXYZ(i3, 1, 0.2, 0.2);
-          colorAttr.setXYZ(i3 + 1, 1, 0.2, 0.2);
-          colorAttr.setXYZ(i3 + 2, 1, 0.2, 0.2);
-        });
+    setTimeout(() => {
+      isRestoringRef.current = false;
+    }, 50);
+  };
 
-        colorAttr.needsUpdate = true;
-        return newSet;
+  const canUndo = historyIndex > 0;
+  const canRedo = historyIndex < history.length - 1;
+
+  const handleUndo = () => {
+    if (historyIndex > 0) {
+      const targetIdx = historyIndex - 1;
+      const targetSnapshot = history[targetIdx];
+      setHistoryIndex(targetIdx);
+      applySnapshot(targetSnapshot, `Geri Alındı: ${targetSnapshot.description}`);
+    }
+  };
+
+  const handleRedo = () => {
+    if (historyIndex < history.length - 1) {
+      const targetIdx = historyIndex + 1;
+      const targetSnapshot = history[targetIdx];
+      setHistoryIndex(targetIdx);
+      applySnapshot(targetSnapshot, `Yinelendi: ${targetSnapshot.description}`);
+    }
+  };
+
+  const handleJumpToHistory = (index) => {
+    if (index >= 0 && index < history.length) {
+      const targetSnapshot = history[index];
+      setHistoryIndex(index);
+      applySnapshot(targetSnapshot, `Adıma Dönüldü (#${index + 1}): ${targetSnapshot.description}`);
+    }
+  };
+
+  const handleClearHistory = () => {
+    if (history.length > 0 && history[historyIndex]) {
+      setHistory([history[historyIndex]]);
+      setHistoryIndex(0);
+      setStatusMessage('İşlem geçmişi temizlendi.');
+    }
+  };
+
+  // Load initial preset
+  useEffect(() => {
+    loadPresetModel('bunny', 'Stanford Bunny');
+  }, []);
+
+  // Update plane normal whenever axis or custom rotation changes
+  const handleClippingConfigChange = (changes) => {
+    setClippingConfig((prev) => {
+      const next = { ...prev, ...changes };
+
+      let nextNormal = new THREE.Vector3(0, 1, 0);
+
+      if (next.axis === 'x') {
+        nextNormal.set(1, 0, 0);
+      } else if (next.axis === 'y') {
+        nextNormal.set(0, 1, 0);
+      } else if (next.axis === 'z') {
+        nextNormal.set(0, 0, 1);
+      } else if (next.axis === 'custom') {
+        const radX = THREE.MathUtils.degToRad(next.rotX || 0);
+        const radY = THREE.MathUtils.degToRad(next.rotY || 0);
+        const radZ = THREE.MathUtils.degToRad(next.rotZ || 0);
+        const euler = new THREE.Euler(radX, radY, radZ, 'XYZ');
+        nextNormal.set(0, 1, 0).applyEuler(euler).normalize();
+      }
+
+      next.normal = nextNormal;
+      return next;
+    });
+
+    if (changes.axis || changes.negate !== undefined || changes.offset !== undefined) {
+      const desc = changes.axis
+        ? `Kesit Düzlemi: ${changes.axis.toUpperCase()} Ekseni`
+        : changes.negate !== undefined
+        ? 'Düzlem Yönü Ters Çevrildi'
+        : `Düzlem Konumu: ${changes.offset?.toFixed(1)} mm`;
+      pushHistory(desc, 'CLIPPING_CONFIG', {
+        clippingConfig: { ...clippingConfig, ...changes }
       });
     }
   };
 
-  return (
-    <>
-      <ambientLight intensity={0.9} />
-      <directionalLight position={[10, 20, 15]} intensity={1.3} />
-      <pointLight position={[-10, -20, -15]} intensity={0.7} />
-      <gridHelper args={[100, 20, '#059669', '#1f2937']} position={[0, -35, 0]} />
-
-      {/* When split, render separated Part A and Part B with pins */}
-      {splitMeshes ? (
-        <group>
-          <primitive 
-            object={splitMeshes.partA} 
-            position={[0, explodedDistance * 0.5, 0]} 
-          />
-          <primitive 
-            object={splitMeshes.partB} 
-            position={[0, -explodedDistance * 0.5, 0]} 
-          />
-        </group>
-      ) : (
-        model && (
-          <primitive 
-            object={model} 
-            onPointerDown={handlePointerDown}
-            onPointerMove={handlePointerMove}
-            onPointerUp={handlePointerUp}
-            onPointerOut={handlePointerUp}
-          />
-        )
-      )}
-
-      {/* Radial Catmull-Rom Spline Line */}
-      {cutPoints.length > 1 && !splitMeshes && (
-        <Line
-          points={cutPoints}
-          color="#facc15"
-          lineWidth={4.5}
-          closed={true}
-        />
-      )}
-    </>
-  );
-}
-
-export default function App() {
-  const [model, setModel] = useState(null);
-  const [modelName, setModelName] = useState('Low-Poly Figurine');
-  const [pinSize, setPinSize] = useState(5);
-  const [brushSize, setBrushSize] = useState(6);
-  const [pinType, setPinType] = useState('pyramid');
-  const [isPainting, setIsPainting] = useState(false);
-  const [paintedFaces, setPaintedFaces] = useState(new Set());
-  const [history, setHistory] = useState([]);
-  const [cutPoints, setCutPoints] = useState([]);
-  const [isWireframe, setIsWireframe] = useState(true);
-  const [isShiftPressed, setIsShiftPressed] = useState(false);
-  const [splitMeshes, setSplitMeshes] = useState(null);
-  const [explodedDistance, setExplodedDistance] = useState(15);
-  const [statusMsg, setStatusMsg] = useState('3D İnceleme Modu: Modeli döndürmek için sürükleyin');
-  const [isSampleMenuOpen, setIsSampleMenuOpen] = useState(false);
-  const controlsRef = useRef();
-
-  // Initialize with procedural figurine model
+  // Sync Three.js Clipping Planes on model material
   useEffect(() => {
-    loadPresetModel('figurine', 'Low-Poly Figurine');
-  }, []);
+    if (!model || !model.material) return;
 
+    if (activeMode === 'plane' && clippingConfig.enabled && !splitResult) {
+      const effNormal = clippingConfig.negate
+        ? clippingConfig.normal.clone().negate()
+        : clippingConfig.normal.clone();
+      const effOffset = clippingConfig.negate
+        ? -clippingConfig.offset
+        : clippingConfig.offset;
+
+      const threePlane = new THREE.Plane(effNormal, -effOffset);
+      model.material.clippingPlanes = [threePlane];
+      model.material.clipShadows = true;
+      model.material.needsUpdate = true;
+    } else {
+      model.material.clippingPlanes = [];
+      model.material.needsUpdate = true;
+    }
+  }, [model, activeMode, clippingConfig, splitResult]);
+
+  // Keyboard shortcuts listener
   useEffect(() => {
     const handleKeyDown = (e) => {
       if (e.key === 'Shift') setIsShiftPressed(true);
+
+      // Undo / Redo Shortcuts (Ctrl+Z, Ctrl+Shift+Z, Ctrl+Y, Cmd+Z, Cmd+Shift+Z, Cmd+Y)
+      if (e.key === 'z' && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        if (e.shiftKey) {
+          handleRedo();
+        } else {
+          handleUndo();
+        }
+      } else if (e.key === 'y' && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        handleRedo();
+      } else if (e.key === 'h' && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        setIsHistoryOpen((prev) => !prev);
+      }
+
+      if (e.key === 'm' || e.key === 'M') {
+        if (!e.target.matches('input, textarea')) {
+          e.preventDefault();
+          handleToggleMeasure();
+        }
+      }
+      if (e.key === 'Escape') {
+        if (isMeasureActive) {
+          handleClearMeasurement();
+        }
+      }
+      if (e.code === 'Space' && !e.target.matches('input, textarea')) {
+        e.preventDefault();
+        if (activeMode === 'lasso') {
+          setIsDrawing((prev) => !prev);
+        } else {
+          setClippingConfig((prev) => ({ ...prev, enabled: !prev.enabled }));
+        }
+      }
     };
+
     const handleKeyUp = (e) => {
       if (e.key === 'Shift') setIsShiftPressed(false);
     };
@@ -296,502 +367,962 @@ export default function App() {
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
     };
-  }, []);
+  }, [history, historyIndex, activeMode, isMeasureActive]);
 
-  const createMeshFromGeometry = (geometry, name) => {
-    const material = new THREE.MeshStandardMaterial({
-      vertexColors: true,
-      roughness: 0.35,
-      metalness: 0.15,
-      wireframe: isWireframe,
-      side: THREE.DoubleSide,
+  /**
+   * Measurement tool handlers
+   */
+  const handleToggleMeasure = () => {
+    setIsMeasureActive((prev) => {
+      const next = !prev;
+      if (next) {
+        setStatusMessage('Ölçüm Aracı Aktif: Model üzerinde 2 noktaya tıklayarak mm cinsinden mesafeyi ölçün.');
+      } else {
+        setStatusMessage('Ölçüm aracı kapatıldı.');
+      }
+      pushHistory(
+        next ? 'Ölçüm Modu Açıldı' : 'Ölçüm Modu Kapatıldı',
+        'MEASURE_TOGGLE',
+        { isMeasureActive: next }
+      );
+      return next;
     });
-
-    const colors = new Float32Array(geometry.attributes.position.count * 3);
-    colors.fill(0.35);
-    geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-
-    const mesh = new THREE.Mesh(geometry, material);
-    setModel(mesh);
-    setModelName(name);
-    setPaintedFaces(new Set());
-    setHistory([]);
-    setCutPoints([]);
-    setSplitMeshes(null);
-    setStatusMsg(`${name} yüklendi (${geometry.attributes.position.count / 3} yüzey)`);
   };
 
-  const loadPresetModel = (type, label) => {
-    const geom = generateSampleGeometry(type);
-    createMeshFromGeometry(geom, label);
-    setIsSampleMenuOpen(false);
+  const handleSetMeasurePointA = (point) => {
+    setMeasurePointA(point);
+    setStatusMessage('1. Nokta (A) işaretlendi. İkinci noktaya tıklayarak mesafeyi ölçün.');
+    pushHistory(
+      `Ölçüm: Nokta A Belirlendi (${point.x.toFixed(1)}, ${point.y.toFixed(1)}, ${point.z.toFixed(1)})`,
+      'MEASURE_POINT_A',
+      { measurePointA: point, measurePointB: null }
+    );
   };
 
-  const handleFileUpload = (event) => {
-    const file = event.target.files[0];
+  const handleSetMeasurePointB = (point) => {
+    setMeasurePointB(point);
+    if (measurePointA && point) {
+      const d = measurePointA.distanceTo(point);
+      setStatusMessage(`Ölçüm Tamamlandı: ${d.toFixed(2)} mm`);
+      pushHistory(
+        `Ölçüm: ${d.toFixed(2)} mm (Nokta A → B)`,
+        'MEASURE_POINT_B',
+        { measurePointB: point }
+      );
+    }
+  };
+
+  const handleClearMeasurement = () => {
+    setMeasurePointA(null);
+    setMeasurePointB(null);
+    setStatusMessage('Ölçüm noktaları temizlendi.');
+    pushHistory('Ölçüm Noktaları Temizlendi', 'MEASURE_CLEAR', {
+      measurePointA: null,
+      measurePointB: null
+    });
+  };
+
+  /**
+   * Applies the current material theme to a mesh with custom opacity and wireframe
+   */
+  const createMaterialForTheme = (theme, wireframe = false, opacity = 1.0, customColor = null) => {
+    const isTransparent = opacity < 0.999;
+
+    if (theme?.normalShader && !customColor) {
+      return new THREE.MeshNormalMaterial({
+        wireframe: wireframe,
+        side: THREE.DoubleSide,
+        transparent: isTransparent,
+        opacity: opacity,
+        depthWrite: !isTransparent
+      });
+    }
+
+    const color = customColor || theme?.color || '#2dafa5';
+    const roughness = theme?.roughness ?? 0.35;
+    const metalness = theme?.metalness ?? 0.15;
+
+    return new THREE.MeshStandardMaterial({
+      color: color,
+      roughness: roughness,
+      metalness: metalness,
+      wireframe: wireframe,
+      side: THREE.DoubleSide,
+      transparent: isTransparent,
+      opacity: opacity,
+      depthWrite: !isTransparent
+    });
+  };
+
+  /**
+   * Synchronizes visual properties (visibility, wireframe, opacity, material) to Three.js meshes
+   */
+  const applyMeshPropertiesToScene = (configs, currentTheme = materialTheme, globalWireframe = isWireframe) => {
+    // 1. Single Main Model
+    if (model) {
+      const cfg = configs.mainModel || {};
+      model.visible = cfg.visible !== false;
+      const effectiveWireframe = cfg.wireframe !== undefined ? cfg.wireframe : globalWireframe;
+      const effectiveOpacity = cfg.opacity !== undefined ? cfg.opacity : 1.0;
+      const effectiveTheme = cfg.materialTheme || currentTheme;
+      const effectiveColor = cfg.customColor || null;
+
+      model.material = createMaterialForTheme(effectiveTheme, effectiveWireframe, effectiveOpacity, effectiveColor);
+      model.material.clippingPlanes = clippingConfig.enabled && !splitResult ? [new THREE.Plane()] : [];
+      model.material.needsUpdate = true;
+    }
+
+    // 2. Split Result: Part A & Part B
+    if (splitResult) {
+      if (splitResult.partA) {
+        const cfgA = configs.partA || {};
+        splitResult.partA.visible = cfgA.visible !== false;
+        const effectiveWireframeA = cfgA.wireframe !== undefined ? cfgA.wireframe : globalWireframe;
+        const effectiveOpacityA = cfgA.opacity !== undefined ? cfgA.opacity : 1.0;
+        const themeA = cfgA.materialTheme || { name: 'Part A (Pin)', color: '#38bdf8', roughness: 0.3, metalness: 0.2 };
+        const colorA = cfgA.customColor || null;
+
+        splitResult.partA.material = createMaterialForTheme(themeA, effectiveWireframeA, effectiveOpacityA, colorA);
+        splitResult.partA.material.needsUpdate = true;
+      }
+
+      if (splitResult.partB) {
+        const cfgB = configs.partB || {};
+        splitResult.partB.visible = cfgB.visible !== false;
+        const effectiveWireframeB = cfgB.wireframe !== undefined ? cfgB.wireframe : globalWireframe;
+        const effectiveOpacityB = cfgB.opacity !== undefined ? cfgB.opacity : 1.0;
+        const themeB = cfgB.materialTheme || { name: 'Part B (Socket)', color: '#a855f7', roughness: 0.3, metalness: 0.2 };
+        const colorB = cfgB.customColor || null;
+
+        splitResult.partB.material = createMaterialForTheme(themeB, effectiveWireframeB, effectiveOpacityB, colorB);
+        splitResult.partB.material.needsUpdate = true;
+      }
+    }
+  };
+
+  // Re-apply mesh properties when configs change
+  useEffect(() => {
+    applyMeshPropertiesToScene(meshConfigs, materialTheme, isWireframe);
+  }, [meshConfigs, model, splitResult]);
+
+  const handleUpdateMeshConfig = (meshId, updates) => {
+    setMeshConfigs((prev) => {
+      const next = {
+        ...prev,
+        [meshId]: {
+          ...(prev[meshId] || { visible: true, wireframe: false, opacity: 1.0 }),
+          ...updates
+        }
+      };
+      applyMeshPropertiesToScene(next, materialTheme, isWireframe);
+      return next;
+    });
+  };
+
+  const handleResetMeshConfig = (meshId) => {
+    setMeshConfigs((prev) => {
+      const next = {
+        ...prev,
+        [meshId]: { visible: true, wireframe: false, opacity: 1.0, materialTheme: null, customColor: null }
+      };
+      applyMeshPropertiesToScene(next, materialTheme, isWireframe);
+      return next;
+    });
+  };
+
+  const handleResetAllMeshConfigs = () => {
+    const next = {
+      mainModel: { visible: true, wireframe: false, opacity: 1.0, materialTheme: null, customColor: null },
+      partA: { visible: true, wireframe: false, opacity: 1.0, materialTheme: null, customColor: null },
+      partB: { visible: true, wireframe: false, opacity: 1.0, materialTheme: null, customColor: null },
+      dowelPin: { visible: true, wireframe: false, opacity: 1.0, materialTheme: null, customColor: null }
+    };
+    setMeshConfigs(next);
+    applyMeshPropertiesToScene(next, materialTheme, isWireframe);
+    setStatusMessage('Tüm nesne materyal ve görünürlük ayarları sıfırlandı.');
+  };
+
+  const handleSetAllVisibility = (visible) => {
+    setMeshConfigs((prev) => {
+      const next = {};
+      Object.keys(prev).forEach((key) => {
+        next[key] = { ...prev[key], visible };
+      });
+      applyMeshPropertiesToScene(next, materialTheme, isWireframe);
+      return next;
+    });
+    setStatusMessage(visible ? 'Tüm 3D nesneler görünür yapıldı.' : 'Tüm 3D nesneler gizlendi.');
+  };
+
+  const handleSetAllWireframe = (wireframe) => {
+    setIsWireframe(wireframe);
+    setMeshConfigs((prev) => {
+      const next = {};
+      Object.keys(prev).forEach((key) => {
+        next[key] = { ...prev[key], wireframe };
+      });
+      applyMeshPropertiesToScene(next, materialTheme, wireframe);
+      return next;
+    });
+    setStatusMessage(wireframe ? 'Tüm nesneler için Tel Kafes (Wireframe) aktif.' : 'Katı yüzey görünümüne geçildi.');
+  };
+
+  const toggleWireframe = () => {
+    const nextState = !isWireframe;
+    setIsWireframe(nextState);
+    handleSetAllWireframe(nextState);
+  };
+
+  const handleSelectMaterialTheme = (theme) => {
+    setMaterialTheme(theme);
+    applyMeshPropertiesToScene(meshConfigs, theme, isWireframe);
+  };
+
+  /**
+   * Loads preset sample 3D model
+   */
+  const loadPresetModel = (presetId, name) => {
+    setIsLoadingFile(true);
+    setStatusMessage(`${name} yükleniyor...`);
+    setSplitResult(null);
+    setShowPostCutBanner(false);
+    handleClearDrawing();
+    handleClearMeasurement();
+
+    try {
+      const { mesh, info } = loadSamplePreset(presetId);
+      mesh.material = createMaterialForTheme(materialTheme, isWireframe);
+
+      setModel(mesh);
+      setModelName(name);
+      setModelInfo(info);
+      setFaceCount(info.triangles);
+      setClippingConfig((prev) => ({ ...prev, offset: 0 }));
+      setModelRotation({ x: 0, y: 0, z: 0 });
+
+      // Initialize fresh history for new model
+      const initSnapshot = createWorkspaceSnapshot({
+        description: `${name} Yüklendi`,
+        type: 'MODEL_LOAD',
+        modelRotation: { x: 0, y: 0, z: 0 },
+        splitResult: null,
+        pinConfig,
+        clippingConfig: { ...clippingConfig, offset: 0 },
+        activeMode
+      });
+      setHistory([initSnapshot]);
+      setHistoryIndex(0);
+
+      setStatusMessage(`${name} hazır.`);
+    } catch (err) {
+      console.error(err);
+      setStatusMessage('Model yükleme hatası.');
+    } finally {
+      setIsLoadingFile(false);
+    }
+  };
+
+  /**
+   * Handles user uploaded custom STL file
+   */
+  const handleFileUpload = (e) => {
+    const file = e.target.files?.[0];
     if (!file) return;
+    handleProcessSTLFile(file);
+  };
+
+  const handleProcessSTLFile = (file) => {
+    setIsLoadingFile(true);
+    setStatusMessage(`${file.name} ayrıştırılıyor...`);
+    setSplitResult(null);
+    setShowPostCutBanner(false);
+    handleClearDrawing();
+    handleClearMeasurement();
 
     const reader = new FileReader();
-    reader.onload = function (e) {
-      const contents = e.target.result;
-      const loader = new STLLoader();
-      const geometry = loader.parse(contents);
-      geometry.center();
-      geometry.computeVertexNormals();
+    reader.onload = (event) => {
+      try {
+        const buffer = event.target.result;
+        const { mesh, info } = parseCustomSTL(buffer, file.name);
+        mesh.material = createMaterialForTheme(materialTheme, isWireframe);
 
-      createMeshFromGeometry(geometry, file.name);
+        setModel(mesh);
+        setModelName(file.name.replace(/\.stl$/i, ''));
+        setModelInfo(info);
+        setFaceCount(info.triangles);
+        setClippingConfig((prev) => ({ ...prev, offset: 0 }));
+        setModelRotation({ x: 0, y: 0, z: 0 });
+
+        const initSnapshot = createWorkspaceSnapshot({
+          description: `${file.name} STL Yüklendi`,
+          type: 'MODEL_LOAD',
+          modelRotation: { x: 0, y: 0, z: 0 },
+          splitResult: null,
+          pinConfig,
+          clippingConfig: { ...clippingConfig, offset: 0 },
+          activeMode
+        });
+        setHistory([initSnapshot]);
+        setHistoryIndex(0);
+
+        setStatusMessage(`${file.name} başarıyla yüklendi.`);
+      } catch (err) {
+        console.error(err);
+        setStatusMessage('STL ayrıştırma hatası: Geçersiz dosya formatı.');
+      } finally {
+        setIsLoadingFile(false);
+      }
     };
     reader.readAsArrayBuffer(file);
   };
 
-  const toggleWireframe = () => {
-    const newWire = !isWireframe;
-    setIsWireframe(newWire);
-    if (model) {
-      model.material.wireframe = newWire;
-    }
-    if (splitMeshes) {
-      splitMeshes.partA.material.wireframe = newWire;
-      splitMeshes.partB.material.wireframe = newWire;
-    }
-  };
+  /**
+   * Executes Mesh Slicing using Clipping Plane
+   */
+  const handleExecutePlaneSlice = () => {
+    if (!model) return;
 
-  const handleUndo = () => {
-    if (history.length === 0 || !model) return;
+    setStatusMessage('Düzlem boyunca kesim yapılıyor ve su sızdırmaz yüzeyler örülüyor...');
 
-    const previousFaces = history[history.length - 1];
-    setHistory((prev) => prev.slice(0, prev.length - 1));
-    setPaintedFaces(previousFaces);
+    setTimeout(() => {
+      try {
+        const effNormal = clippingConfig.negate
+          ? clippingConfig.normal.clone().negate()
+          : clippingConfig.normal.clone();
+        const effOffset = clippingConfig.negate
+          ? -clippingConfig.offset
+          : clippingConfig.offset;
 
-    const geometry = model.geometry;
-    const colorAttr = geometry.attributes.color;
-    const count = geometry.attributes.position.count;
+        const result = sliceMeshWithPlane(
+          model,
+          effNormal,
+          effOffset,
+          pinConfig,
+          clippingConfig.addPinOnSlice
+        );
 
-    for (let i = 0; i < count; i++) {
-      colorAttr.setXYZ(i, 0.35, 0.35, 0.35);
-    }
+        setSplitResult(result);
+        setShowPostCutBanner(true);
+        setStatusMessage(
+          `Model başarıyla 2 parçaya ayrıldı! (Kesit: ${result.cutAreaCm2} cm²)`
+        );
 
-    previousFaces.forEach((fIdx) => {
-      const i3 = fIdx * 3;
-      colorAttr.setXYZ(i3, 1, 0.2, 0.2);
-      colorAttr.setXYZ(i3 + 1, 1, 0.2, 0.2);
-      colorAttr.setXYZ(i3 + 2, 1, 0.2, 0.2);
-    });
-    colorAttr.needsUpdate = true;
-    setCutPoints([]);
-    setStatusMsg(`Geri alındı (${previousFaces.size} yüzey boyalı)`);
-  };
-
-  // Radial sorting & Catmull-Rom spline extraction
-  const handleCompletePainting = () => {
-    if (paintedFaces.size === 0 || !model) {
-      setStatusMsg("Lütfen önce model üzerinde çevre hatlarını boyayın.");
-      return;
-    }
-
-    setIsPainting(false);
-    const geometry = model.geometry;
-    const posAttr = geometry.attributes.position;
-    const edgeCounts = new Map();
-    const getVertexKey = (x, y, z) => `${x.toFixed(1)},${y.toFixed(1)},${z.toFixed(1)}`;
-
-    paintedFaces.forEach((fIdx) => {
-      const i3 = fIdx * 3;
-      const vA = new THREE.Vector3(posAttr.getX(i3), posAttr.getY(i3), posAttr.getZ(i3)).applyMatrix4(model.matrixWorld);
-      const vB = new THREE.Vector3(posAttr.getX(i3 + 1), posAttr.getY(i3 + 1), posAttr.getZ(i3 + 1)).applyMatrix4(model.matrixWorld);
-      const vC = new THREE.Vector3(posAttr.getX(i3 + 2), posAttr.getY(i3 + 2), posAttr.getZ(i3 + 2)).applyMatrix4(model.matrixWorld);
-
-      const edges = [[vA, vB], [vB, vC], [vC, vA]];
-      edges.forEach(([p1, p2]) => {
-        const k1 = getVertexKey(p1.x, p1.y, p1.z);
-        const k2 = getVertexKey(p2.x, p2.y, p2.z);
-        const edgeKey = k1 < k2 ? `${k1}_${k2}` : `${k2}_${k1}`;
-
-        if (!edgeCounts.has(edgeKey)) {
-          edgeCounts.set(edgeKey, { count: 0, p1, p2 });
-        }
-        edgeCounts.get(edgeKey).count += 1;
-      });
-    });
-
-    const boundaryPoints = [];
-    edgeCounts.forEach((data) => {
-      if (data.count === 1) {
-        boundaryPoints.push(data.p1, data.p2);
+        // Push Cut Operation onto History
+        pushHistory(
+          `Düzlem Kesimi (${result.cutAreaCm2 || 0} cm²)`,
+          'CUT_PLANE',
+          { splitResult: result }
+        );
+      } catch (err) {
+        console.error(err);
+        setStatusMessage('Kesim sırasında hata oluştu.');
       }
-    });
-
-    if (boundaryPoints.length < 3) {
-      setStatusMsg("Sınır noktaları bulunamadı. Lütfen kesintisiz bir halka boyayın.");
-      return;
-    }
-
-    // Unique boundary points
-    const uniquePoints = [];
-    const addedKeys = new Set();
-    boundaryPoints.forEach(p => {
-      const key = getVertexKey(p.x, p.y, p.z);
-      if (!addedKeys.has(key)) {
-        addedKeys.add(key);
-        uniquePoints.push(p.clone());
-      }
-    });
-
-    // Center point
-    const center = new THREE.Vector3();
-    uniquePoints.forEach(p => center.add(p));
-    center.divideScalar(uniquePoints.length);
-
-    // Radially sort around center
-    uniquePoints.sort((a, b) => {
-      const angleA = Math.atan2(a.z - center.z, a.x - center.x);
-      const angleB = Math.atan2(b.z - center.z, b.x - center.x);
-      return angleA - angleB;
-    });
-
-    const curve = new THREE.CatmullRomCurve3(uniquePoints, true, 'catmullrom', 0.2);
-    const sampledPoints = curve.getPoints(150);
-
-    setCutPoints(sampledPoints.map(v => [v.x, v.y, v.z]));
-    setStatusMsg("Spline Kement Çemberi Oluşturuldu! Kesim ve Pin eklemeye hazır.");
+    }, 50);
   };
 
-  // Perform split into Part A (Male Pin) and Part B (Female Socket)
-  const handleSplitAndAddPins = () => {
-    if (!model || cutPoints.length === 0) {
-      setStatusMsg("Lütfen önce boyamayı tamamlayıp spline kement oluşturun.");
-      return;
-    }
+  /**
+   * Executes Mesh Slicing using Lasso Path
+   */
+  const handleExecuteLassoSplit = () => {
+    if (!model || drawnPoints.length < 3) return;
 
-    const origGeom = model.geometry.clone();
-    const posAttr = origGeom.attributes.position;
-    const count = posAttr.count / 3;
+    setStatusMessage('Kement çizgisi boyunca kesim ve pin oluşturuluyor...');
 
-    // Plane y-cutoff based on cut points average
-    let avgY = 0;
-    cutPoints.forEach(p => avgY += p[1]);
-    avgY /= cutPoints.length;
+    setTimeout(() => {
+      try {
+        const result = sliceMeshWithLasso(model, drawnPoints, pinConfig);
+        setSplitResult(result);
+        setIsDrawing(false);
+        setShowPostCutBanner(true);
+        setStatusMessage('Model serbest kement eğrisi boyunca başarıyla kesildi!');
 
-    const partAGeom = new THREE.BufferGeometry();
-    const partBGeom = new THREE.BufferGeometry();
-
-    const partAVerts = [];
-    const partBVerts = [];
-
-    for (let i = 0; i < count; i++) {
-      const i3 = i * 3;
-      const v1 = new THREE.Vector3(posAttr.getX(i3), posAttr.getY(i3), posAttr.getZ(i3));
-      const v2 = new THREE.Vector3(posAttr.getX(i3 + 1), posAttr.getY(i3 + 1), posAttr.getZ(i3 + 1));
-      const v3 = new THREE.Vector3(posAttr.getX(i3 + 2), posAttr.getY(i3 + 2), posAttr.getZ(i3 + 2));
-
-      const cy = (v1.y + v2.y + v3.y) / 3;
-      if (cy >= avgY) {
-        partAVerts.push(v1.x, v1.y, v1.z, v2.x, v2.y, v2.z, v3.x, v3.y, v3.z);
-      } else {
-        partBVerts.push(v1.x, v1.y, v1.z, v2.x, v2.y, v2.z, v3.x, v3.y, v3.z);
+        // Push Lasso Split Operation onto History
+        pushHistory('Serbest Kement Kesimi', 'CUT_LASSO', {
+          splitResult: result,
+          isDrawing: false
+        });
+      } catch (err) {
+        console.error(err);
+        setStatusMessage('Kesim başarısız oldu.');
       }
-    }
-
-    // Add Male Pin Geometry to Part A (Pyramid or Prism)
-    const pinGeom = pinType === 'pyramid' 
-      ? new THREE.ConeGeometry(pinSize * 0.8, pinSize * 1.5, 4)
-      : new THREE.CylinderGeometry(pinSize * 0.6, pinSize * 0.6, pinSize * 1.2, 8);
-    pinGeom.translate(0, avgY - (pinSize * 0.75), 0);
-    const pinPos = pinGeom.attributes.position;
-    for (let i = 0; i < pinPos.count; i++) {
-      partAVerts.push(pinPos.getX(i), pinPos.getY(i), pinPos.getZ(i));
-    }
-
-    partAGeom.setAttribute('position', new THREE.Float32BufferAttribute(partAVerts, 3));
-    partBGeom.setAttribute('position', new THREE.Float32BufferAttribute(partBVerts, 3));
-    partAGeom.computeVertexNormals();
-    partBGeom.computeVertexNormals();
-
-    const matA = new THREE.MeshStandardMaterial({
-      color: '#10b981',
-      roughness: 0.3,
-      metalness: 0.2,
-      wireframe: isWireframe
-    });
-    const matB = new THREE.MeshStandardMaterial({
-      color: '#6366f1',
-      roughness: 0.3,
-      metalness: 0.2,
-      wireframe: isWireframe
-    });
-
-    const meshA = new THREE.Mesh(partAGeom, matA);
-    const meshB = new THREE.Mesh(partBGeom, matB);
-
-    setSplitMeshes({ partA: meshA, partB: meshB });
-    setStatusMsg("Model başarıyla ayrıştırıldı! Part A (Erkek Pin) ve Part B (Dişi Yuva) oluşturuldu.");
+    }, 50);
   };
 
-  const handleExportSTL = () => {
-    if (splitMeshes) {
-      exportBinarySTL(splitMeshes.partA.geometry, `${modelName}_Part_A_Male_Pin`);
-      setTimeout(() => {
-        exportBinarySTL(splitMeshes.partB.geometry, `${modelName}_Part_B_Female_Socket`);
-      }, 400);
-      setStatusMsg("Part A ve Part B STL dosyaları indirildi.");
-    } else if (model) {
-      exportBinarySTL(model.geometry, `${modelName}`);
-      setStatusMsg("STL modeli başarıyla indirildi.");
+  const handleResetSplit = () => {
+    setSplitResult(null);
+    setShowPostCutBanner(false);
+    setStatusMessage('Model orijinal haline getirildi.');
+    pushHistory('Model Yeniden Birleştirildi', 'RESET_SPLIT', { splitResult: null });
+  };
+
+  /**
+   * Lasso Freehand Drawing Point management
+   */
+  const handleAddPoint = (point) => {
+    setDrawnPoints((prev) => [...prev, point]);
+  };
+
+  const handleAddStrokePoints = (points) => {
+    setDrawnPoints((prev) => [...prev, ...points]);
+  };
+
+  const handleClearDrawing = () => {
+    setDrawnPoints([]);
+    setIsLoopClosed(false);
+    setLoopPoints([]);
+    setStatusMessage('Çizim temizlendi.');
+    pushHistory('Kement Çizimi Temizlendi', 'LASSO_CLEAR', {
+      drawnPoints: [],
+      isLoopClosed: false,
+      loopPoints: []
+    });
+  };
+
+  const handleUndoPoint = () => {
+    setDrawnPoints((prev) => {
+      const next = prev.slice(0, -5);
+      if (next.length < 3) setIsLoopClosed(false);
+      return next;
+    });
+  };
+
+  const handleCloseLoop = () => {
+    if (drawnPoints.length < 3) return;
+    const nextLoop = [...drawnPoints, drawnPoints[0]];
+    setIsLoopClosed(true);
+    setLoopPoints(nextLoop);
+    setIsDrawing(false);
+    setStatusMessage('Kement halkası kapatıldı. Kilit pimi yerleşimi hazır.');
+    pushHistory('Kement Halkası Kapatıldı', 'LASSO_CLOSE', {
+      isLoopClosed: true,
+      loopPoints: nextLoop
+    });
+  };
+
+  const handlePinConfigChange = (changes) => {
+    const nextPin = { ...pinConfig, ...changes };
+    setPinConfig(nextPin);
+
+    let desc = 'Pim/Delik Ayarı Güncellendi';
+    if (changes.mode) {
+      const modeLabel =
+        changes.mode === 'holes_both'
+          ? 'Çift Delik (Dübel)'
+          : changes.mode === 'pin_and_hole'
+          ? 'Pim + Delik'
+          : changes.mode === 'hole_only'
+          ? 'Yalnızca Delik'
+          : changes.mode === 'pin_only'
+          ? 'Yalnızca Pim'
+          : 'Düz Kesim';
+      desc = `Bağlantı Modu: ${modeLabel}`;
+    } else if (changes.diameter !== undefined) {
+      desc = `Pim Çapı: Ø${changes.diameter} mm`;
+    } else if (changes.depth !== undefined) {
+      desc = `Pim Derinliği: ${changes.depth} mm`;
+    } else if (changes.clearance !== undefined) {
+      desc = `Fit Boşluğu: ${changes.clearance} mm`;
+    } else if (changes.type) {
+      desc = `Pim Geometrisi: ${changes.type}`;
     }
+
+    pushHistory(desc, 'PIN_CONFIG', { pinConfig: nextPin });
   };
 
   const resetCamera = () => {
     if (controlsRef.current) {
       controlsRef.current.reset();
+      setStatusMessage('Kamera sıfırlandı.');
     }
   };
 
+  /**
+   * 3D Model Rotation & Alignment Handlers
+   */
+  const handleModelRotationChange = (newRotation, pushToHist = false) => {
+    const norm = {
+      x: ((newRotation.x % 360) + 540) % 360 - 180,
+      y: ((newRotation.y % 360) + 540) % 360 - 180,
+      z: ((newRotation.z % 360) + 540) % 360 - 180
+    };
+    setModelRotation(norm);
+
+    if (pushToHist) {
+      const desc = `Model Döndürüldü (X:${Math.round(norm.x)}° Y:${Math.round(norm.y)}° Z:${Math.round(norm.z)}°)`;
+      pushHistory(desc, 'MODEL_ROTATE', { modelRotation: norm });
+    }
+  };
+
+  const handleStepRotate = (axis, delta) => {
+    setModelRotation((prev) => {
+      const next = {
+        ...prev,
+        [axis]: (((prev[axis] + delta) % 360) + 540) % 360 - 180
+      };
+      const desc = `${axis.toUpperCase()} Ekseninde ${delta > 0 ? '+' : ''}${delta}° Döndürüldü`;
+      pushHistory(desc, 'MODEL_ROTATE', { modelRotation: next });
+      return next;
+    });
+    setStatusMessage(`${axis.toUpperCase()} ekseninde ${delta > 0 ? '+' : ''}${delta}° döndürüldü.`);
+  };
+
+  const handleResetRotation = () => {
+    const resetRot = { x: 0, y: 0, z: 0 };
+    setModelRotation(resetRot);
+    pushHistory('Model Yönelimi Sıfırlandı (0°, 0°, 0°)', 'MODEL_ALIGN', { modelRotation: resetRot });
+    setStatusMessage('Model dönüşü sıfırlandı (0°, 0°, 0°).');
+  };
+
+  const handleAlignFlat = () => {
+    setModelRotation((prev) => {
+      const snapped = {
+        x: Math.round((prev.x || 0) / 90) * 90,
+        y: Math.round((prev.y || 0) / 90) * 90,
+        z: Math.round((prev.z || 0) / 90) * 90
+      };
+      pushHistory('Model Tablaya Oturtuldu (90° Snap)', 'MODEL_ALIGN', { modelRotation: snapped });
+      return snapped;
+    });
+    setStatusMessage('Model en yakın 90° dik açıyla tablaya hizalandı.');
+  };
+
+  const handleRotationDragEnd = () => {
+    const desc = `Model Döndürüldü (Gizmo: X:${Math.round(modelRotation.x)}° Y:${Math.round(modelRotation.y)}° Z:${Math.round(modelRotation.z)}°)`;
+    pushHistory(desc, 'MODEL_ROTATE', { modelRotation });
+  };
+
+  const handleToggleRotateGizmo = () => {
+    setIsRotateGizmoActive((prev) => {
+      const next = !prev;
+      setStatusMessage(
+        next
+          ? '3D Döndürme Gizmosu açıldı. Eksen halkalarını sürükleyerek modeli çevirebilirsiniz.'
+          : '3D Döndürme Gizmosu kapatıldı.'
+      );
+      return next;
+    });
+  };
+
+  /**
+   * Direct STL Downloads
+   */
+  const handleExportPartA = () => {
+    if (splitResult) {
+      downloadMeshSTL(splitResult.partA.geometry, `${modelName}_Part_1_Pin.stl`, 'binary');
+      setStatusMessage(`Part 1 STL (${modelName}_Part_1_Pin.stl) indirildi.`);
+    }
+  };
+
+  const handleExportPartB = () => {
+    if (splitResult) {
+      downloadMeshSTL(splitResult.partB.geometry, `${modelName}_Part_2_Socket.stl`, 'binary');
+      setStatusMessage(`Part 2 STL (${modelName}_Part_2_Socket.stl) indirildi.`);
+    }
+  };
+
+  const handleExportCombined = () => {
+    if (splitResult) {
+      downloadCombinedSTL(splitResult.partA, splitResult.partB, modelName, 'binary');
+      setStatusMessage(`Birleştirilmiş Kesilmiş STL (${modelName}_Sliced_Combined.stl) indirildi.`);
+    }
+  };
+
+  const handleExportZip = async () => {
+    if (splitResult) {
+      await downloadAllPartsZip(splitResult.partA, splitResult.partB, modelName, {
+        dowelPinGeometry: splitResult.dowelPinGeometry,
+        dowelSpecs: splitResult.dowelSpecs
+      });
+      setStatusMessage('Tüm parçalar ZIP paketi olarak indirildi (3D baskıya hazır).');
+    }
+  };
+
+  const handleExportDowelPin = () => {
+    if (splitResult?.dowelPinGeometry) {
+      const specs = splitResult.dowelSpecs || { diameter: 8, length: 20 };
+      downloadMeshSTL(
+        splitResult.dowelPinGeometry,
+        `${modelName}_Alignment_Dowel_Pin_D${specs.diameter}xL${specs.length}.stl`,
+        'binary'
+      );
+      setStatusMessage(`Hizalama Dübel Pimi STL indirildi (Ø${specs.diameter}mm x ${specs.length}mm).`);
+    }
+  };
+
+  const handleExportFullModel = () => {
+    if (model) {
+      downloadMeshSTL(model.geometry, `${modelName}.stl`, 'binary');
+      setStatusMessage(`${modelName}.stl dosyası indirildi.`);
+    }
+  };
+
+  const statsA = splitResult ? calculateGeometryStats(splitResult.partA?.geometry) : null;
+  const statsB = splitResult ? calculateGeometryStats(splitResult.partB?.geometry) : null;
+
   return (
-    <div className="flex flex-col md:flex-row h-screen w-screen bg-gray-950 text-white font-sans overflow-hidden">
-      {/* Sol Panel / Alt Panel (Mobil Uyumlu Kontroller) */}
-      <div className="w-full md:w-88 md:max-w-xs bg-gray-900 border-b md:border-b-0 md:border-r border-gray-800 flex flex-col p-4 shadow-2xl z-10 overflow-y-auto max-h-[45vh] md:max-h-full">
-        {/* Başlık ve Logo */}
-        <div className="flex items-center justify-between mb-4">
-          <h1 className="text-lg font-bold flex items-center gap-2 text-emerald-400">
-            <Scissors className="w-5 h-5 text-emerald-400" /> STL PinCut 3D
-          </h1>
-          
-          {/* Örnek Modeller Dropdown */}
-          <div className="relative">
-            <button
-              onClick={() => setIsSampleMenuOpen(!isSampleMenuOpen)}
-              className="flex items-center gap-1 text-xs bg-gray-800 hover:bg-gray-700 text-emerald-400 px-2.5 py-1.5 rounded-lg border border-gray-700 transition"
-            >
-              <Box className="w-3.5 h-3.5" /> Örnekler <ChevronDown className="w-3 h-3" />
-            </button>
-            {isSampleMenuOpen && (
-              <div className="absolute right-0 mt-1 w-48 bg-gray-850 border border-gray-700 rounded-lg shadow-xl py-1 z-50">
-                <button 
-                  onClick={() => loadPresetModel('figurine', 'Low-Poly Figurine')}
-                  className="w-full text-left px-3 py-1.5 text-xs text-gray-200 hover:bg-emerald-600/20 hover:text-emerald-400 flex items-center gap-2"
-                >
-                  <Sparkles className="w-3.5 h-3.5" /> Heykel Figür
-                </button>
-                <button 
-                  onClick={() => loadPresetModel('bracket', 'Mechanical Bracket')}
-                  className="w-full text-left px-3 py-1.5 text-xs text-gray-200 hover:bg-emerald-600/20 hover:text-emerald-400 flex items-center gap-2"
-                >
-                  <Layers className="w-3.5 h-3.5" /> Mekanik Braket
-                </button>
-                <button 
-                  onClick={() => loadPresetModel('cylinder', 'Cylinder Joint')}
-                  className="w-full text-left px-3 py-1.5 text-xs text-gray-200 hover:bg-emerald-600/20 hover:text-emerald-400 flex items-center gap-2"
-                >
-                  <RotateCcw className="w-3.5 h-3.5" /> Silindir Mafsal
-                </button>
-                <button 
-                  onClick={() => loadPresetModel('prism', 'Hexagonal Prism')}
-                  className="w-full text-left px-3 py-1.5 text-xs text-gray-200 hover:bg-emerald-600/20 hover:text-emerald-400 flex items-center gap-2"
-                >
-                  <Box className="w-3.5 h-3.5" /> Altıgen Prizma
-                </button>
-              </div>
-            )}
+    <div className="flex flex-col md:flex-row h-screen w-screen bg-gray-950 text-white font-sans overflow-hidden select-none">
+      {/* Left Control Panel */}
+      <ControlsPanel
+        modelName={modelName}
+        modelInfo={modelInfo}
+        faceCount={faceCount}
+        activeMode={activeMode}
+        onSelectMode={(mode) => {
+          setActiveMode(mode);
+          if (mode === 'lasso') setIsDrawing(true);
+        }}
+        clippingConfig={clippingConfig}
+        onClippingConfigChange={handleClippingConfigChange}
+        onExecutePlaneSlice={handleExecutePlaneSlice}
+        isDrawing={isDrawing}
+        onToggleDrawing={() => setIsDrawing((prev) => !prev)}
+        drawnPointsCount={drawnPoints.length}
+        onCloseLoop={handleCloseLoop}
+        onClearDrawing={handleClearDrawing}
+        onUndoPoint={handleUndoPoint}
+        isLoopClosed={isLoopClosed}
+        pinConfig={pinConfig}
+        onPinConfigChange={handlePinConfigChange}
+        splitResult={splitResult}
+        onExecuteLassoSplit={handleExecuteLassoSplit}
+        onResetSplit={handleResetSplit}
+        explodedDistance={explodedDistance}
+        onExplodedDistanceChange={(val) => {
+          setExplodedDistance(val);
+          pushHistory(`Patlatılmış Görünüm: ${val} mm`, 'EXPLODED_DISTANCE', { explodedDistance: val });
+        }}
+        onExportPartA={handleExportPartA}
+        onExportPartB={handleExportPartB}
+        onExportCombined={handleExportCombined}
+        onExportZip={handleExportZip}
+        onExportFullModel={handleExportFullModel}
+        onExportDowelPin={handleExportDowelPin}
+        onOpenExportModal={() => setIsExportModalOpen(true)}
+        onFileUpload={handleFileUpload}
+        onSelectPreset={loadPresetModel}
+        isWireframe={isWireframe}
+        onToggleWireframe={toggleWireframe}
+        onResetCamera={resetCamera}
+        materialTheme={materialTheme}
+        onSelectMaterialTheme={handleSelectMaterialTheme}
+        showGrid={showGrid}
+        onToggleGrid={() => setShowGrid((prev) => !prev)}
+        showBoundingBox={showBoundingBox}
+        onToggleBoundingBox={() => setShowBoundingBox((prev) => !prev)}
+        autoRotate={autoRotate}
+        onToggleAutoRotate={() => setAutoRotate((prev) => !prev)}
+        onOpenInspector={() => setIsInspectorOpen(true)}
+        isMeasureActive={isMeasureActive}
+        onToggleMeasure={handleToggleMeasure}
+        measurePointA={measurePointA}
+        measurePointB={measurePointB}
+        onClearMeasurement={handleClearMeasurement}
+        // Model Rotation & Alignment props
+        modelRotation={modelRotation}
+        onModelRotationChange={handleModelRotationChange}
+        onStepRotate={handleStepRotate}
+        onResetRotation={handleResetRotation}
+        onAlignFlat={handleAlignFlat}
+        isRotateGizmoActive={isRotateGizmoActive}
+        onToggleRotateGizmo={handleToggleRotateGizmo}
+        snapAngle={snapAngle}
+        onSetSnapAngle={setSnapAngle}
+        // History props
+        canUndo={canUndo}
+        canRedo={canRedo}
+        onUndo={handleUndo}
+        onRedo={handleRedo}
+        historyCount={history.length}
+        currentHistoryIndex={historyIndex}
+        onOpenHistory={() => setIsHistoryOpen(true)}
+        onOpenMeshList={() => setIsMeshListOpen((prev) => !prev)}
+        meshCount={splitResult ? (splitResult.dowelPinGeometry ? 3 : 2) : (model ? 1 : 0)}
+      />
+
+      {/* Right 3D Viewport Scene */}
+      <div className="flex-1 relative h-full bg-gradient-to-br from-gray-950 via-slate-900 to-black">
+        {/* Top Floating Bar: Status Badge & Quick Undo/Redo/History */}
+        <div className="absolute top-4 left-4 right-4 z-10 pointer-events-none flex items-center justify-between gap-2">
+          {/* Status Badge */}
+          <div className="bg-gray-900/90 backdrop-blur-md border border-gray-700/80 px-3.5 py-1.5 rounded-full text-xs text-gray-200 shadow-2xl flex items-center gap-2.5 pointer-events-auto">
+            <span
+              className={`w-2.5 h-2.5 rounded-full shrink-0 ${
+                isLoadingFile
+                  ? 'bg-amber-400 animate-spin'
+                  : isRotateGizmoActive
+                  ? 'bg-amber-400 animate-pulse'
+                  : isMeasureActive
+                  ? 'bg-cyan-400 animate-pulse'
+                  : splitResult
+                  ? 'bg-cyan-400 animate-pulse'
+                  : activeMode === 'plane' && clippingConfig.enabled
+                  ? 'bg-blue-400 animate-pulse'
+                  : isLoopClosed
+                  ? 'bg-emerald-400'
+                  : 'bg-emerald-500'
+              }`}
+            />
+            <span className="font-medium truncate max-w-[280px] sm:max-w-md">{statusMessage}</span>
           </div>
-        </div>
 
-        {/* Model Yükleme Kartı */}
-        <div className="mb-4">
-          <label className="flex items-center gap-3 border-2 border-dashed border-gray-700 hover:border-emerald-500 rounded-lg p-2.5 cursor-pointer transition bg-gray-950/60">
-            <Upload className="w-5 h-5 text-emerald-400 shrink-0" />
-            <div className="flex flex-col">
-              <span className="text-xs font-semibold text-gray-200">STL Modeli Yükle</span>
-              <span className="text-[10px] text-gray-400">{modelName}</span>
-            </div>
-            <input type="file" accept=".stl" onChange={handleFileUpload} className="hidden" />
-          </label>
-        </div>
-
-        {model && (
-          <div className="flex flex-col gap-3.5 border-t border-gray-800 pt-3">
-            <div className="flex items-center justify-between">
-              <h2 className="text-xs font-bold text-gray-300 uppercase tracking-wider flex items-center gap-1.5">
-                <Sliders className="w-3.5 h-3.5 text-emerald-400" /> Kesim ve Pin Ayarları
-              </h2>
-              <button 
-                onClick={toggleWireframe}
-                className="flex items-center gap-1 bg-gray-800 hover:bg-gray-700 text-gray-300 py-1 px-2 rounded text-[11px] border border-gray-700"
-              >
-                <Eye className="w-3 h-3 text-emerald-400" /> 
-                {isWireframe ? 'Solid' : 'Kafes'}
-              </button>
-            </div>
-
-            {/* Pin Tipi */}
-            <div>
-              <label className="text-[11px] text-gray-400 mb-1 block font-medium">Pin Geometrisi</label>
-              <div className="grid grid-cols-2 gap-2">
-                <button
-                  onClick={() => setPinType('pyramid')}
-                  className={`py-1.5 px-2 rounded text-xs font-medium border transition ${pinType === 'pyramid' ? 'bg-emerald-600/30 border-emerald-500 text-emerald-300' : 'bg-gray-800/60 border-gray-700 text-gray-400'}`}
-                >
-                  Piramit Pin
-                </button>
-                <button
-                  onClick={() => setPinType('prism')}
-                  className={`py-1.5 px-2 rounded text-xs font-medium border transition ${pinType === 'prism' ? 'bg-emerald-600/30 border-emerald-500 text-emerald-300' : 'bg-gray-800/60 border-gray-700 text-gray-400'}`}
-                >
-                  Düz Prizma
-                </button>
-              </div>
-            </div>
-
-            {/* Pin Boyutu */}
-            <div>
-              <div className="flex justify-between text-[11px] text-gray-400 mb-1">
-                <span>Pin Boyutu</span>
-                <span className="text-emerald-400 font-bold">{pinSize} mm</span>
-              </div>
-              <input 
-                type="range" 
-                min="2" 
-                max="15" 
-                value={pinSize} 
-                onChange={(e) => setPinSize(Number(e.target.value))}
-                className="w-full accent-emerald-400 cursor-pointer h-1.5 bg-gray-800 rounded-lg appearance-none"
-              />
-            </div>
-
-            {/* Fırça Kalınlığı */}
-            <div>
-              <div className="flex justify-between text-[11px] text-gray-400 mb-1">
-                <span>Fırça Kalınlığı</span>
-                <span className="text-amber-400 font-bold">{brushSize} mm</span>
-              </div>
-              <input 
-                type="range" 
-                min="2" 
-                max="15" 
-                value={brushSize} 
-                onChange={(e) => setBrushSize(Number(e.target.value))}
-                className="w-full accent-amber-400 cursor-pointer h-1.5 bg-gray-800 rounded-lg appearance-none"
-              />
-            </div>
-
-            {/* Patlatılmış Görünüm Slider */}
-            {splitMeshes && (
-              <div className="bg-indigo-950/30 border border-indigo-500/30 rounded-lg p-2">
-                <div className="flex justify-between text-[11px] text-indigo-300 mb-1">
-                  <span>Ayrılma Mesafesi</span>
-                  <span className="font-bold">{explodedDistance} mm</span>
-                </div>
-                <input 
-                  type="range" 
-                  min="0" 
-                  max="40" 
-                  value={explodedDistance} 
-                  onChange={(e) => setExplodedDistance(Number(e.target.value))}
-                  className="w-full accent-indigo-400 cursor-pointer h-1.5 bg-gray-800 rounded-lg appearance-none"
-                />
-              </div>
-            )}
-
-            {/* Boyama & Geri Al Butonları */}
-            <div className="flex gap-2">
-              <button 
-                onClick={() => {
-                  const next = !isPainting;
-                  setIsPainting(next);
-                  setStatusMsg(next ? "Boyama Modu: Model üzerinde kesim hattı çizin" : "3D İnceleme Modu");
-                }}
-                className={`flex-1 py-2 px-3 rounded-lg font-semibold transition text-xs flex items-center justify-center gap-1.5 shadow ${isPainting ? 'bg-amber-600 hover:bg-amber-500 text-white' : 'bg-emerald-600 hover:bg-emerald-500 text-white'}`}
-              >
-                <Brush className="w-3.5 h-3.5" />
-                {isPainting ? 'Boyamayı Kapat' : 'Boyamayı Başlat'}
-              </button>
-
-              <button 
+          {/* Top Right Quick Undo/Redo & Export Controls */}
+          <div className="flex items-center gap-1.5 pointer-events-auto">
+            {/* Viewport Floating Undo / Redo */}
+            <div className="hidden sm:flex items-center bg-gray-900/90 backdrop-blur-md border border-gray-700/80 rounded-full p-1 shadow-2xl">
+              <button
                 onClick={handleUndo}
-                disabled={history.length === 0}
-                className="bg-gray-800 hover:bg-gray-700 disabled:opacity-40 text-gray-200 px-3 rounded-lg font-medium transition border border-gray-700 flex items-center justify-center text-xs"
-                title="Geri Al"
+                disabled={!canUndo}
+                className={`p-1.5 rounded-full transition ${
+                  canUndo
+                    ? 'text-blue-300 hover:bg-blue-500/20 active:scale-95'
+                    : 'text-gray-600 cursor-not-allowed opacity-50'
+                }`}
+                title="Geri Al (Ctrl+Z)"
               >
-                <Undo2 className="w-4 h-4" />
+                <Undo2 className="w-3.5 h-3.5" />
+              </button>
+
+              <button
+                onClick={handleRedo}
+                disabled={!canRedo}
+                className={`p-1.5 rounded-full transition ${
+                  canRedo
+                    ? 'text-emerald-300 hover:bg-emerald-500/20 active:scale-95'
+                    : 'text-gray-600 cursor-not-allowed opacity-50'
+                }`}
+                title="Yinele (Ctrl+Y)"
+              >
+                <Redo2 className="w-3.5 h-3.5" />
+              </button>
+
+              <div className="w-[1px] h-3 bg-gray-700 mx-0.5" />
+
+              <button
+                onClick={() => setIsHistoryOpen(true)}
+                className="p-1.5 rounded-full text-indigo-300 hover:bg-indigo-500/20 transition flex items-center gap-1 text-[11px] px-2 font-mono"
+                title="İşlem Geçmişi Çizelgesi"
+              >
+                <History className="w-3.5 h-3.5" />
+                <span>{historyIndex + 1}/{history.length}</span>
               </button>
             </div>
 
-            {/* Spline Kement Tamamlama */}
-            {(isPainting || paintedFaces.size > 0) && (
-              <button 
-                onClick={handleCompletePainting}
-                className="flex items-center justify-center gap-1.5 bg-purple-600 hover:bg-purple-500 text-white py-2 px-3 rounded-lg font-semibold transition shadow text-xs animate-pulse"
+            {/* Quick Export Button when Split Result is active */}
+            {splitResult && (
+              <button
+                onClick={() => setIsExportModalOpen(true)}
+                className="bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white text-xs font-bold px-3.5 py-1.5 rounded-full shadow-2xl flex items-center gap-1.5 border border-emerald-400/40 transition hover:scale-105"
               >
-                <CheckCircle className="w-3.5 h-3.5" /> Boyamayı Tamamla (Spline Kement)
+                <Download className="w-3.5 h-3.5" />
+                <span className="hidden sm:inline">Modifiye STL İndir</span>
+                <span className="sm:hidden">İndir</span>
               </button>
             )}
-
-            {/* Modeli Ayrıştır ve Pin Ekle */}
-            {cutPoints.length > 0 && !splitMeshes && (
-              <button 
-                onClick={handleSplitAndAddPins}
-                className="flex items-center justify-center gap-1.5 bg-emerald-600 hover:bg-emerald-500 text-white py-2 px-3 rounded-lg font-bold transition shadow text-xs"
-              >
-                <Scissors className="w-3.5 h-3.5" /> Parçaları Ayrıştır & Pim Ekle
-              </button>
-            )}
-
-            {/* STL İndir Butonu */}
-            <button 
-              onClick={handleExportSTL}
-              className="flex items-center justify-center gap-1.5 bg-blue-600 hover:bg-blue-500 text-white py-2 px-3 rounded-lg font-bold transition shadow text-xs"
-            >
-              <Download className="w-3.5 h-3.5" /> {splitMeshes ? 'Parçaları STL Olarak İndir' : 'Modeli STL Olarak İndir'}
-            </button>
-          </div>
-        )}
-      </div>
-
-      {/* Sağ Panel: 3D Görünüm Alanı */}
-      <div className="flex-1 relative bg-gradient-to-br from-gray-950 via-gray-900 to-black h-full">
-        {/* Durum / Bildirim Rozeti */}
-        <div className="absolute top-3 left-3 z-10 flex items-center gap-2">
-          <div className="bg-gray-900/80 backdrop-blur-md border border-gray-700/80 px-3 py-1.5 rounded-full text-xs text-gray-200 shadow-lg flex items-center gap-2">
-            <span className={`w-2 h-2 rounded-full ${splitMeshes ? 'bg-indigo-400 animate-ping' : isPainting ? 'bg-amber-400' : 'bg-emerald-400'}`} />
-            <span>{statusMsg}</span>
           </div>
         </div>
 
-        {/* Hızlı Kamera Sıfırlama Butonu */}
-        <div className="absolute top-3 right-3 z-10">
-          <button 
-            onClick={resetCamera}
-            className="p-2 bg-gray-900/80 hover:bg-gray-800 backdrop-blur-md border border-gray-700 text-gray-300 rounded-full shadow-lg transition"
-            title="Kamerayı Sıfırla"
-          >
-            <RotateCcw className="w-4 h-4 text-emerald-400" />
-          </button>
-        </div>
+        {/* Post-Cut Floating Download Banner */}
+        {splitResult && showPostCutBanner && (
+          <div className="absolute bottom-4 left-4 right-4 md:left-6 md:right-6 bg-gray-900/95 border border-emerald-500/50 text-white p-4 rounded-2xl backdrop-blur-xl shadow-2xl z-20 flex flex-col md:flex-row items-center justify-between gap-3 animate-in slide-in-from-bottom-5 duration-300">
+            <div className="flex items-center gap-3">
+              <div className="p-2.5 bg-emerald-500/20 border border-emerald-500/30 rounded-xl text-emerald-400 shrink-0">
+                <CheckCircle2 className="w-5 h-5" />
+              </div>
+              <div>
+                <div className="text-xs font-bold text-emerald-300 flex items-center gap-2">
+                  <span>Kesim Tamamlandı! Modifiye Edilmiş STL Mesh Hazır</span>
+                  {statsA && statsB && (
+                    <span className="text-[10px] bg-gray-800 text-gray-300 px-2 py-0.5 rounded font-mono">
+                      {(statsA.triangles + statsB.triangles).toLocaleString()} Üçgen
+                    </span>
+                  )}
+                </div>
+                <p className="text-[11px] text-gray-400">
+                  Parçaları ayrı ayrı STL olarak veya 3D baskı paketi (ZIP) olarak tek tıkla indirebilirsiniz. (Geri almak için Ctrl+Z yapabilirsiniz)
+                </p>
+              </div>
+            </div>
 
-        {/* 3D Sahne Canvas */}
-        <Canvas camera={{ position: [0, 0, 140], fov: 50 }}>
-          <SceneManager 
-            model={model} 
-            splitMeshes={splitMeshes}
-            explodedDistance={explodedDistance}
-            isPainting={isPainting} 
-            paintedFaces={paintedFaces} 
-            setPaintedFaces={setPaintedFaces}
-            cutPoints={cutPoints} 
-            isShiftPressed={isShiftPressed}
-            brushSize={brushSize} 
-            setHistory={setHistory}
-          />
-          <OrbitControls ref={controlsRef} makeDefault enableRotate={!isPainting || isShiftPressed} />
-        </Canvas>
+            <div className="flex items-center flex-wrap gap-2 w-full md:w-auto justify-end">
+              <button
+                onClick={handleExportPartA}
+                className="py-1.5 px-3 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-xs font-semibold transition flex items-center gap-1.5 shadow"
+                title="Part 1 STL İndir"
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span>Part 1 STL</span>
+              </button>
 
-        {/* Boyama İpucu Kutusu */}
-        {isPainting && (
-          <div className="absolute bottom-4 left-4 right-4 md:right-auto md:left-4 bg-amber-500/20 border border-amber-500/50 text-amber-300 px-3.5 py-2 rounded-xl text-xs backdrop-blur-md shadow-xl flex items-center gap-2">
-            <Sparkles className="w-4 h-4 shrink-0 text-amber-400" />
-            <span>Radyal sıralama aktif: Yüzeyleri boyayın, sistem kusursuz bir kement halkası oluşturacaktır. (Shift ile döndürün)</span>
+              <button
+                onClick={handleExportPartB}
+                className="py-1.5 px-3 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-semibold transition flex items-center gap-1.5 shadow"
+                title="Part 2 STL İndir"
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span>Part 2 STL</span>
+              </button>
+
+              {splitResult.dowelPinGeometry && (
+                <button
+                  onClick={handleExportDowelPin}
+                  className="py-1.5 px-3 bg-gradient-to-r from-amber-600 to-orange-600 hover:from-amber-500 hover:to-orange-500 text-white rounded-lg text-xs font-bold transition flex items-center gap-1.5 shadow"
+                  title="Ayrı Dübel Pimi STL İndir"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span>Dübel Pimi STL</span>
+                </button>
+              )}
+
+              <button
+                onClick={handleExportZip}
+                className="py-1.5 px-3 bg-gradient-to-r from-cyan-600 to-indigo-600 hover:from-cyan-500 hover:to-indigo-500 text-white rounded-lg text-xs font-bold transition flex items-center gap-1.5 shadow"
+                title="Tüm Parçaları ZIP İndir"
+              >
+                <FolderArchive className="w-3.5 h-3.5" />
+                <span>Tümü (ZIP)</span>
+              </button>
+
+              <button
+                onClick={() => setIsExportModalOpen(true)}
+                className="py-1.5 px-2.5 bg-gray-800 hover:bg-gray-700 text-gray-300 rounded-lg text-xs font-medium transition"
+                title="Gelişmiş Dışa Aktarma Seçenekleri"
+              >
+                Seçenekler...
+              </button>
+
+              <button
+                onClick={() => setShowPostCutBanner(false)}
+                className="p-1.5 text-gray-400 hover:text-white bg-gray-800/80 hover:bg-gray-800 rounded-lg transition"
+                title="Kapat"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
           </div>
         )}
+
+        {/* Live Hint Bars */}
+        {activeMode === 'plane' && clippingConfig.enabled && !splitResult && !isMeasureActive && (
+          <div className="absolute bottom-4 left-4 right-4 md:right-auto bg-gray-900/90 border border-blue-500/40 text-blue-300 px-4 py-2.5 rounded-2xl text-xs backdrop-blur-lg shadow-2xl flex items-center gap-3 z-10">
+            <div className="p-1.5 bg-blue-500/20 rounded-lg text-blue-400">
+              <Sliders className="w-4 h-4 shrink-0" />
+            </div>
+            <div>
+              <span className="font-semibold text-white">Canlı Kesit:</span> Kesim eksenini veya offset kaydırıcısını ayarlayarak modeli anında inceleyin; hazır olduğunuzda <strong className="text-white">"Düzlemden Kes"</strong> butonuna basın. (Geri almak için <kbd className="bg-gray-800 border border-gray-700 px-1 py-0.5 rounded text-white font-mono text-[10px]">Ctrl+Z</kbd>)
+            </div>
+          </div>
+        )}
+
+        {activeMode === 'lasso' && isDrawing && !isLoopClosed && !isMeasureActive && (
+          <div className="absolute bottom-4 left-4 right-4 md:right-auto bg-gray-900/90 border border-amber-500/40 text-amber-300 px-4 py-2.5 rounded-2xl text-xs backdrop-blur-lg shadow-2xl flex items-center gap-3 z-10">
+            <div className="p-1.5 bg-amber-500/20 rounded-lg text-amber-400">
+              <Sparkles className="w-4 h-4 shrink-0" />
+            </div>
+            <div>
+              <span className="font-semibold text-white">Çizim İpucu:</span> Model üzerinde sürükleyerek kesim kementi çizin. Modeli döndürmek için <kbd className="bg-gray-800 border border-gray-700 px-1.5 py-0.5 rounded text-white font-mono text-[10px]">Shift</kbd> tuşunu basılı tutun.
+            </div>
+          </div>
+        )}
+
+        {/* 3D Viewport Component */}
+        <Viewport3D
+          model={model}
+          modelInfo={modelInfo}
+          splitResult={splitResult}
+          explodedDistance={explodedDistance}
+          activeMode={activeMode}
+          clippingConfig={clippingConfig}
+          onClippingConfigChange={handleClippingConfigChange}
+          isDrawing={isDrawing}
+          drawnPoints={drawnPoints}
+          onAddPoint={handleAddPoint}
+          onAddStrokePoints={handleAddStrokePoints}
+          onCloseLoop={handleCloseLoop}
+          isLoopClosed={isLoopClosed}
+          loopPoints={loopPoints}
+          pinConfig={pinConfig}
+          onPinConfigChange={handlePinConfigChange}
+          isShiftPressed={isShiftPressed}
+          controlsRef={controlsRef}
+          materialTheme={materialTheme}
+          showGrid={showGrid}
+          showBoundingBox={showBoundingBox}
+          autoRotate={autoRotate}
+          onFileDrop={handleProcessSTLFile}
+          isMeasureActive={isMeasureActive}
+          measurePointA={measurePointA}
+          measurePointB={measurePointB}
+          onSetMeasurePointA={handleSetMeasurePointA}
+          onSetMeasurePointB={handleSetMeasurePointB}
+          onClearMeasurement={handleClearMeasurement}
+          onToggleMeasure={handleToggleMeasure}
+          // Model Rotation & Alignment props
+          modelRotation={modelRotation}
+          onModelRotationChange={handleModelRotationChange}
+          onRotationEnd={handleRotationDragEnd}
+          isRotateGizmoActive={isRotateGizmoActive}
+          onToggleRotateGizmo={handleToggleRotateGizmo}
+          snapAngle={snapAngle}
+          onSetSnapAngle={setSnapAngle}
+          onStepRotate={handleStepRotate}
+          onResetRotation={handleResetRotation}
+          onAlignFlat={handleAlignFlat}
+          // Mesh List Side Panel props
+          isMeshListOpen={isMeshListOpen}
+          onToggleMeshList={() => setIsMeshListOpen((prev) => !prev)}
+          meshCount={splitResult ? (splitResult.dowelPinGeometry ? 3 : 2) : (model ? 1 : 0)}
+        />
+
+        {/* 3D Meshes & Outliner Side Panel */}
+        <MeshListPanel
+          isOpen={isMeshListOpen}
+          onClose={() => setIsMeshListOpen(false)}
+          model={model}
+          modelName={modelName}
+          modelInfo={modelInfo}
+          splitResult={splitResult}
+          meshConfigs={meshConfigs}
+          onUpdateMeshConfig={handleUpdateMeshConfig}
+          onResetMeshConfig={handleResetMeshConfig}
+          onResetAllMeshConfigs={handleResetAllMeshConfigs}
+          onSetAllVisibility={handleSetAllVisibility}
+          onSetAllWireframe={handleSetAllWireframe}
+        />
       </div>
+
+      {/* Model Inspector Modal */}
+      <ModelInspector
+        info={modelInfo}
+        isOpen={isInspectorOpen}
+        onClose={() => setIsInspectorOpen(false)}
+      />
+
+      {/* Sliced STL Export Modal */}
+      <ExportModal
+        isOpen={isExportModalOpen}
+        onClose={() => setIsExportModalOpen(false)}
+        modelName={modelName}
+        splitResult={splitResult}
+        originalModel={model}
+        onNotify={(msg) => setStatusMessage(msg)}
+      />
+
+      {/* History Timeline Panel (Undo/Redo & Time Travel) */}
+      <HistoryPanel
+        isOpen={isHistoryOpen}
+        onClose={() => setIsHistoryOpen(false)}
+        history={history}
+        currentIndex={historyIndex}
+        onJumpToHistory={handleJumpToHistory}
+        onUndo={handleUndo}
+        onRedo={handleRedo}
+        onClearHistory={handleClearHistory}
+        canUndo={canUndo}
+        canRedo={canRedo}
+      />
     </div>
   );
 }
+
+export default App;
+

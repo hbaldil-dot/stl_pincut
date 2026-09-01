@@ -1,11 +1,31 @@
-# STL PinCut 3D (Android)
+# STL PinCut 3D - Interactive 3D Model Slicer with Alignment Pins
 
-Native Android application rewritten from React + Three.js to Kotlin and Jetpack Compose.
+An interactive 3D model cutting and alignment pin generator designed for 3D printing, matching the exact workflow seen in specialized 3D character slicing tools (Nomad Sculpt / Blender pin cut tools).
 
-## Features
-- **3D Model Engine**: Interactive 3D STL viewer with 360° orbit, zoom, pan, and solid/wireframe rendering modes.
-- **STL File Import & Export**: Supports loading ASCII and Binary STL files directly from Android storage or bundled 3D sample models (Figurine, Bracket, Cylinder Connector, Hexagonal Prism). Exports split parts as 3D-printable binary STL files with Android system share sheet support.
-- **Surface Paint Lasso**: Interactive 3D face painting with configurable brush size radius and undo history.
-- **Radial Spline Cutting Line**: Algorithmic boundary extraction and radial sorting generating smooth Catmull-Rom 3D cut loop around models.
-- **Alignment Pin & Socket Slicing**: Slices mesh along the cutting plane and automatically generates male alignment pins (Tapered Pyramid or Straight Prism) and corresponding female socket cavities.
-- **Exploded View Animation**: Interactive separation slider to preview split parts before 3D printing.
+## Core Features
+1. **Interactive 3D Surface Lasso Drawing**:
+   - Precision 3D surface crosshair `(+)` cursor.
+   - Real-time raycasted Red 3D spline adhering to mesh contours.
+   - Green start point indicator node.
+   - Elastic Yellow rubber-band closing guide line connecting the cursor to the start marker.
+   - Smooth loop closure and node snapping.
+
+2. **Automated Cut Plane & Pin Generator (Videodaki Akış)**:
+   - Instant generation of Neon Green cut cap slice surface upon closing the loop.
+   - Translucent Orange Connector Pin (Tapered Truncated Pyramid, Cylindrical Dowel, Hexagonal Prism) positioned at the centroid and aligned along the cut plane normal.
+   - Dashed direction axis line with double arrow indicators.
+   - Real-time adjustment for Pin Width, Height, Taper Ratio, and Orientation Flip.
+
+3. **Mesh Slicing & Female Socket Clearance**:
+   - Slices 3D meshes along arbitrary best-fit cut planes.
+   - Attaches Male Pin to Part 1 and generates matching Female Socket Pocket in Part 2 with calibrated 3D printing clearance.
+   - Real-time Exploded View slider to pull apart cut pieces and inspect internal joints.
+
+4. **Stylized Sculpt Clay Shader & High-Detail Presets**:
+   - Turquoise Clay MatCap shader with specular highlights and ambient shading.
+   - Bundled presets: Bearded Character Sculpt Bust, Muscular Anatomy Arm, Mechanical Assembly Bracket, Stepped Cylinder Joint.
+   - Full support for custom Binary and ASCII `.stl` file uploads.
+
+5. **Direct 3D Print Export**:
+   - One-click Binary STL download for Part 1 (Male Pin) and Part 2 (Female Socket).
+   - One-click ZIP package download with all parts and 3D printing slicing instructions.
