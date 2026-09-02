@@ -22,6 +22,7 @@ import {
   downloadCombinedSTL,
   downloadAllPartsZip
 } from '../utils/stlExporter';
+import { ExportConfigPanel } from './ExportConfigPanel';
 
 export function ExportModal({
   isOpen,
@@ -29,19 +30,38 @@ export function ExportModal({
   modelName,
   splitResult,
   originalModel,
+  exportConfig,
+  onChangeExportConfig,
   onNotify
 }) {
-  const [exportFormat, setExportFormat] = useState('binary'); // 'binary' | 'ascii'
+  const [localConfig, setLocalConfig] = useState({
+    format: 'binary',
+    density: 1.0,
+    preset: 'original',
+    decimalPrecision: 4
+  });
+
   const [customName, setCustomName] = useState(modelName || 'Modified_Model');
   const [copiedTip, setCopiedTip] = useState(false);
   const [isExportingZip, setIsExportingZip] = useState(false);
 
   if (!isOpen) return null;
 
+  const currentConfig = exportConfig || localConfig;
+  const updateConfig = (newCfg) => {
+    if (onChangeExportConfig) {
+      onChangeExportConfig(newCfg);
+    } else {
+      setLocalConfig(newCfg);
+    }
+  };
+
+  const exportFormat = currentConfig.format || 'binary';
+  const density = typeof currentConfig.density === 'number' ? currentConfig.density : 1.0;
   const cleanName = (customName || modelName || 'Model').trim().replace(/\.stl$/i, '');
 
-  const statsA = calculateGeometryStats(splitResult?.partA?.geometry);
-  const statsB = calculateGeometryStats(splitResult?.partB?.geometry);
+  const statsA = calculateGeometryStats(splitResult?.partA?.geometry, density);
+  const statsB = calculateGeometryStats(splitResult?.partB?.geometry, density);
   const dowelGeom = splitResult?.dowelPinGeometry || null;
   const dowelSpecs = splitResult?.dowelSpecs || null;
   const pinCfg = splitResult?.pinConfig || null;
@@ -54,9 +74,12 @@ export function ExportModal({
     downloadMeshSTL(
       splitResult.partA.geometry,
       `${cleanName}_${suffix}.stl`,
-      exportFormat
+      exportFormat,
+      currentConfig
     );
-    if (onNotify) onNotify(`Part 1 (${cleanName}_${suffix}.stl) indirildi.`);
+    if (onNotify) {
+      onNotify(`Part 1 (${cleanName}_${suffix}.stl) [${exportFormat.toUpperCase()}, %${Math.round(density * 100)}] indirildi.`);
+    }
   };
 
   const handleDownloadPartB = () => {
@@ -65,9 +88,12 @@ export function ExportModal({
     downloadMeshSTL(
       splitResult.partB.geometry,
       `${cleanName}_${suffix}.stl`,
-      exportFormat
+      exportFormat,
+      currentConfig
     );
-    if (onNotify) onNotify(`Part 2 (${cleanName}_${suffix}.stl) indirildi.`);
+    if (onNotify) {
+      onNotify(`Part 2 (${cleanName}_${suffix}.stl) [${exportFormat.toUpperCase()}, %${Math.round(density * 100)}] indirildi.`);
+    }
   };
 
   const handleDownloadDowelPin = () => {
@@ -75,9 +101,12 @@ export function ExportModal({
     downloadMeshSTL(
       dowelGeom,
       `${cleanName}_Alignment_Dowel_Pin_D${dowelSpecs?.diameter || 8}xL${dowelSpecs?.length || 20}.stl`,
-      exportFormat
+      exportFormat,
+      currentConfig
     );
-    if (onNotify) onNotify(`Hizalama Dübel Pimi STL indirildi (Ø${dowelSpecs?.diameter || 8}mm x ${dowelSpecs?.length || 20}mm).`);
+    if (onNotify) {
+      onNotify(`Hizalama Dübel Pimi STL indirildi (Ø${dowelSpecs?.diameter || 8}mm x ${dowelSpecs?.length || 20}mm).`);
+    }
   };
 
   const handleDownloadCombined = () => {
@@ -86,9 +115,12 @@ export function ExportModal({
       splitResult.partA,
       splitResult.partB,
       cleanName,
-      exportFormat
+      exportFormat,
+      currentConfig
     );
-    if (onNotify) onNotify(`Birleştirilmiş Model (${cleanName}_Sliced_Combined.stl) indirildi.`);
+    if (onNotify) {
+      onNotify(`Birleştirilmiş Model (${cleanName}_Sliced_Combined.stl) [${exportFormat.toUpperCase()}] indirildi.`);
+    }
   };
 
   const handleDownloadZip = async () => {
@@ -96,6 +128,7 @@ export function ExportModal({
     setIsExportingZip(true);
     try {
       await downloadAllPartsZip(splitResult.partA, splitResult.partB, cleanName, {
+        ...currentConfig,
         format: exportFormat,
         includeCombined: true,
         dowelPinGeometry: dowelGeom,
@@ -130,11 +163,11 @@ export function ExportModal({
               <h2 className="text-base font-bold text-white flex items-center gap-2">
                 <span>Modifiye Edilmiş STL Mesh Dışa Aktar</span>
                 <span className="text-[11px] bg-emerald-950 text-emerald-400 border border-emerald-800/60 px-2 py-0.5 rounded-full font-mono">
-                  3D Printable
+                  {exportFormat.toUpperCase()} • %{Math.round(density * 100)}
                 </span>
               </h2>
               <p className="text-xs text-gray-400">
-                Kesilmiş parçaları, silindirik hizalama deliklerini ve dübel pimlerini STL veya ZIP olarak indirin
+                Kesilmiş parçaları, silindirik delikleri ve dübel pimlerini STL veya ZIP olarak indirin
               </p>
             </div>
           </div>
@@ -149,51 +182,28 @@ export function ExportModal({
 
         {/* Modal Body */}
         <div className="p-5 overflow-y-auto space-y-4">
-          {/* File Name & Format Selection */}
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-            <div className="sm:col-span-2">
-              <label className="text-xs font-semibold text-gray-300 block mb-1.5">
-                Dosya Adı Ön Eki
-              </label>
-              <input
-                type="text"
-                value={customName}
-                onChange={(e) => setCustomName(e.target.value)}
-                className="w-full bg-gray-950 border border-gray-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-emerald-500 transition font-mono"
-                placeholder="Model_Adi"
-              />
-            </div>
-
-            <div>
-              <label className="text-xs font-semibold text-gray-300 block mb-1.5">
-                STL Formatı
-              </label>
-              <div className="grid grid-cols-2 gap-1 bg-gray-950 p-1 rounded-xl border border-gray-800">
-                <button
-                  type="button"
-                  onClick={() => setExportFormat('binary')}
-                  className={`py-1 px-2 rounded-lg text-xs font-semibold transition ${
-                    exportFormat === 'binary'
-                      ? 'bg-emerald-600 text-white shadow'
-                      : 'text-gray-400 hover:text-gray-200'
-                  }`}
-                >
-                  Binary (Kompakt)
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setExportFormat('ascii')}
-                  className={`py-1 px-2 rounded-lg text-xs font-semibold transition ${
-                    exportFormat === 'ascii'
-                      ? 'bg-emerald-600 text-white shadow'
-                      : 'text-gray-400 hover:text-gray-200'
-                  }`}
-                >
-                  ASCII (Metin)
-                </button>
-              </div>
-            </div>
+          {/* File Name Prefix */}
+          <div>
+            <label className="text-xs font-semibold text-gray-300 block mb-1.5">
+              Dosya Adı Ön Eki
+            </label>
+            <input
+              type="text"
+              value={customName}
+              onChange={(e) => setCustomName(e.target.value)}
+              className="w-full bg-gray-950 border border-gray-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-emerald-500 transition font-mono"
+              placeholder="Model_Adi"
+            />
           </div>
+
+          {/* Export Configuration Panel (Precision / Density + Format Toggle) */}
+          <ExportConfigPanel
+            config={currentConfig}
+            onChangeConfig={updateConfig}
+            statsA={statsA}
+            statsB={statsB}
+            totalTriangles={totalTriangles}
+          />
 
           {/* Sliced Parts Cards */}
           {splitResult ? (
@@ -212,11 +222,17 @@ export function ExportModal({
                         Part 1
                       </span>
                       <span className="text-[10px] font-mono text-blue-400 bg-blue-950/60 px-1.5 py-0.5 rounded border border-blue-800/50">
-                        {exportFormat === 'binary' ? statsA.binarySizeFormatted : statsA.asciiSizeFormatted}
+                        {exportFormat === 'binary' ? statsA.projectedBinarySizeFormatted : statsA.projectedAsciiSizeFormatted}
                       </span>
                     </div>
                     <div className="text-[11px] text-gray-400 space-y-0.5 font-mono">
-                      <div>Üçgen Sayısı: <span className="text-gray-200">{statsA.triangles.toLocaleString()}</span></div>
+                      <div className="flex items-center gap-1">
+                        <span>Üçgen:</span>
+                        <span className="text-gray-200 font-bold">{statsA.projectedTriangles.toLocaleString()}</span>
+                        {density < 0.98 && (
+                          <span className="text-gray-500 text-[10px] line-through">({statsA.triangles.toLocaleString()})</span>
+                        )}
+                      </div>
                       <div>Özellik: <span className="text-emerald-400">{pinCfg?.mode === 'holes_both' ? 'Silindirik Dübel Deliği' : pinCfg?.mode === 'pin_only' || pinCfg?.mode === 'pin_and_hole' ? 'Montaj Pimi Entegre' : 'Su Sızdırmaz Kapak'}</span></div>
                     </div>
                   </div>
@@ -239,11 +255,17 @@ export function ExportModal({
                         Part 2
                       </span>
                       <span className="text-[10px] font-mono text-emerald-400 bg-emerald-950/60 px-1.5 py-0.5 rounded border border-emerald-800/50">
-                        {exportFormat === 'binary' ? statsB.binarySizeFormatted : statsB.asciiSizeFormatted}
+                        {exportFormat === 'binary' ? statsB.projectedBinarySizeFormatted : statsB.projectedAsciiSizeFormatted}
                       </span>
                     </div>
                     <div className="text-[11px] text-gray-400 space-y-0.5 font-mono">
-                      <div>Üçgen Sayısı: <span className="text-gray-200">{statsB.triangles.toLocaleString()}</span></div>
+                      <div className="flex items-center gap-1">
+                        <span>Üçgen:</span>
+                        <span className="text-gray-200 font-bold">{statsB.projectedTriangles.toLocaleString()}</span>
+                        {density < 0.98 && (
+                          <span className="text-gray-500 text-[10px] line-through">({statsB.triangles.toLocaleString()})</span>
+                        )}
+                      </div>
                       <div>Özellik: <span className="text-emerald-400">{pinCfg?.mode === 'pin_and_hole' ? 'Hizalama Deliği (Soket)' : pinCfg?.mode === 'holes_both' ? 'Silindirik Dübel Deliği' : 'Su Sızdırmaz Kapak'}</span></div>
                     </div>
                   </div>
@@ -289,7 +311,7 @@ export function ExportModal({
                     <span>Birleştirilmiş Modifiye Mesh (Combined Assembly)</span>
                   </div>
                   <p className="text-[11px] text-gray-400 mt-0.5">
-                    Her iki kesilmiş parçayı tek bir STL dosyasında indirir ({totalTriangles.toLocaleString()} üçgen)
+                    Her iki kesilmiş parçayı tek bir STL dosyasında indirir ({((statsA.projectedTriangles || 0) + (statsB.projectedTriangles || 0)).toLocaleString()} üçgen)
                   </p>
                 </div>
 
@@ -312,7 +334,7 @@ export function ExportModal({
                 <span>
                   {isExportingZip
                     ? 'ZIP Paketi Oluşturuluyor...'
-                    : 'Tüm Parçaları, Dübel Pimini ve 3D Baskı Kılavuzunu ZIP Olarak İndir'}
+                    : `Tüm Parçaları, Dübel Pimini ve 3D Baskı Kılavuzunu ZIP Olarak İndir [${exportFormat.toUpperCase()} • %${Math.round(density * 100)}]`}
                 </span>
               </button>
             </div>
@@ -320,19 +342,19 @@ export function ExportModal({
             /* If no slice operation has taken place yet, allow exporting the loaded model */
             <div className="bg-gray-950/60 border border-gray-800 rounded-xl p-4 text-center space-y-3">
               <div className="text-xs text-gray-300">
-                Henüz bir kesme işlemi yapılmadı. Mevcut modeli STL olarak indirebilir veya kesme işlemini tamamladıktan sonra ayrıştırılmış STL parçalarını alabilirsiniz.
+                Henüz bir kesme işlemi yapılmadı. Mevcut modeli yapılandırılmış ayarlarla STL olarak indirebilir veya kesme işlemini tamamladıktan sonra ayrıştırılmış STL parçalarını alabilirsiniz.
               </div>
               <button
                 onClick={() => {
                   if (originalModel?.geometry) {
-                    downloadMeshSTL(originalModel.geometry, `${cleanName}.stl`, exportFormat);
-                    if (onNotify) onNotify(`${cleanName}.stl indirildi.`);
+                    downloadMeshSTL(originalModel.geometry, `${cleanName}.stl`, exportFormat, currentConfig);
+                    if (onNotify) onNotify(`${cleanName}.stl [${exportFormat.toUpperCase()} • %${Math.round(density * 100)}] indirildi.`);
                   }
                 }}
                 className="py-2 px-4 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-xs font-semibold transition inline-flex items-center gap-1.5"
               >
                 <Download className="w-4 h-4" />
-                <span>Mevcut Modeli STL Olarak İndir</span>
+                <span>Mevcut Modeli STL Olarak İndir ({exportFormat.toUpperCase()} • %{Math.round(density * 100)})</span>
               </button>
             </div>
           )}
@@ -371,3 +393,4 @@ export function ExportModal({
     </div>
   );
 }
+

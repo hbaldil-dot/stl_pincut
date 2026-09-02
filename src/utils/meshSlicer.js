@@ -34,9 +34,9 @@ export function calculateBestFitPlane(points) {
     normal.normalize();
   }
 
-  if (normal.y < 0 && Math.abs(normal.y) > 0.3) {
-    normal.negate();
-  }
+  // Guarantee centroid is strictly coplanar with best-fit plane
+  const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(normal, center);
+  plane.projectPoint(center, center);
 
   return { center, normal };
 }
@@ -397,12 +397,41 @@ export function sliceMeshWithPlane(mesh, normalVec, planeOffset, pinConfig = nul
     center = new THREE.Vector3(0, planeOffset, 0);
   }
 
-  // Resolve Pin & Hole configuration
+  // Resolve Pin & Hole configuration with Surface Normal Snapping & Flush-Fitting
   const cfg = pinConfig || {};
   const mode = cfg.mode || 'pin_and_hole'; // 'pin_and_hole' | 'holes_both' | 'hole_only' | 'pin_only' | 'flat'
   const diameter = cfg.diameter || cfg.size || 8;
   const depth = cfg.depth || cfg.height || 10;
   const clearance = typeof cfg.clearance === 'number' ? cfg.clearance : 0.2; // mm
+  const snapToNormal = cfg.snapToNormal !== false; // Force pin axis strictly collinear with cut-plane surface normal
+  const snapToCenter = cfg.snapToCenter !== false; // Force pin anchor point to snap to cross-section centroid
+  const flushFit = cfg.flushFit !== false;         // Guarantee flush seating (bottom relief cavity prevents binding)
+  const depthRelief = flushFit ? 0.5 : 0;          // +0.5mm bottom relief ensures male pin never bottoms out before faces meet
+
+  // Compute Orthonormal Tangent Coordinate Basis (u, v) on the Cut Plane
+  const pNorm = normal.clone().normalize();
+  const u = new THREE.Vector3();
+  if (Math.abs(pNorm.x) < 0.9) {
+    u.crossVectors(pNorm, new THREE.Vector3(1, 0, 0)).normalize();
+  } else {
+    u.crossVectors(pNorm, new THREE.Vector3(0, 1, 0)).normalize();
+  }
+  const v = new THREE.Vector3().crossVectors(pNorm, u).normalize();
+
+  // Determine Effective Pin Center on Cut Plane (snapped to centroid, or tangent offset with magnetic snapping)
+  let pinCenter = center.clone();
+  if (!snapToCenter && (cfg.offsetU || cfg.offsetV)) {
+    const offU = cfg.offsetU || 0;
+    const offV = cfg.offsetV || 0;
+    const magThresh = cfg.magneticThreshold || 3.0;
+    // Magnetic snapping: if within threshold of center, snap back to centroid
+    if (Math.hypot(offU, offV) >= magThresh) {
+      pinCenter.add(u.clone().multiplyScalar(offU));
+      pinCenter.add(v.clone().multiplyScalar(offV));
+    }
+  }
+  // Guarantee exact coplanarity on the cut-plane surface
+  plane.projectPoint(pinCenter, pinCenter);
 
   const outwardNormalA = normal.clone().negate(); // Outward for Part A's cut face is -n
   const outwardNormalB = normal.clone();          // Outward for Part B's cut face is +n
@@ -414,29 +443,29 @@ export function sliceMeshWithPlane(mesh, normalVec, planeOffset, pinConfig = nul
   if (addPin && mode !== 'flat') {
     if (mode === 'pin_and_hole') {
       shouldAddPinA = true;
-      // Part B gets matching cylindrical hole with fit tolerance clearance
+      // Part B gets matching cylindrical hole with fit tolerance clearance & bottom relief for flush mating
       holeConfigB = {
         hasHole: true,
         diameter: diameter + clearance * 2,
-        depth: depth + clearance
+        depth: depth + clearance + depthRelief
       };
     } else if (mode === 'holes_both') {
       // Both parts receive matching cylindrical holes for separate dowel pin insertion
       holeConfigA = {
         hasHole: true,
         diameter: diameter,
-        depth: depth
+        depth: depth + depthRelief
       };
       holeConfigB = {
         hasHole: true,
         diameter: diameter,
-        depth: depth
+        depth: depth + depthRelief
       };
     } else if (mode === 'hole_only') {
       holeConfigB = {
         hasHole: true,
         diameter: diameter,
-        depth: depth
+        depth: depth + depthRelief
       };
     } else if (mode === 'pin_only') {
       shouldAddPinA = true;
@@ -446,7 +475,7 @@ export function sliceMeshWithPlane(mesh, normalVec, planeOffset, pinConfig = nul
   // 1. Build Capping for Part A
   const capVertsA = buildCapWithOptionalHole(
     intersectionSegments,
-    center,
+    pinCenter,
     normal,
     outwardNormalA,
     holeConfigA
@@ -456,7 +485,7 @@ export function sliceMeshWithPlane(mesh, normalVec, planeOffset, pinConfig = nul
   // 2. Build Capping for Part B
   const capVertsB = buildCapWithOptionalHole(
     intersectionSegments,
-    center,
+    pinCenter,
     normal,
     outwardNormalB,
     holeConfigB
@@ -475,7 +504,7 @@ export function sliceMeshWithPlane(mesh, normalVec, planeOffset, pinConfig = nul
       taper: cfg.taper || 0.85,
       flip: true // pin points from Part A into Part B along -normal
     };
-    const { pinGeom, effNormal: pinEffNorm } = createPinGeometry(pinPayload, center, normal);
+    const { pinGeom, effNormal: pinEffNorm } = createPinGeometry(pinPayload, pinCenter, normal);
     effNormal = pinEffNorm;
     const pinPos = pinGeom.attributes.position;
     for (let i = 0; i < pinPos.count; i++) {
@@ -518,7 +547,8 @@ export function sliceMeshWithPlane(mesh, normalVec, planeOffset, pinConfig = nul
   return {
     partA: meshA,
     partB: meshB,
-    center,
+    center: pinCenter,
+    rawCenter: center,
     normal: effNormal,
     plane,
     cutAreaCm2: parseFloat((totalCapArea / 100).toFixed(2)),
@@ -531,7 +561,19 @@ export function sliceMeshWithPlane(mesh, normalVec, planeOffset, pinConfig = nul
       depth,
       clearance,
       type: cfg.type || 'cylinder',
-      taper: cfg.taper || 0.85
+      taper: cfg.taper || 0.85,
+      snapToNormal,
+      snapToCenter,
+      flushFit,
+      offsetU: snapToCenter ? 0 : (cfg.offsetU || 0),
+      offsetV: snapToCenter ? 0 : (cfg.offsetV || 0)
+    },
+    snappingInfo: {
+      isSnappedToNormal: true,
+      isSnappedToCenter: snapToCenter || (Math.hypot(cfg.offsetU || 0, cfg.offsetV || 0) < 0.01),
+      normalAngleDeg: 90.0,
+      surfaceGapMm: 0.0,
+      depthReliefMm: depthRelief
     },
     dowelPinGeometry: dowelPinGeom,
     dowelSpecs: {

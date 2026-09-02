@@ -11,7 +11,9 @@ export function ClippingPlaneHelper({
   planeOffset,
   planeSize = 80,
   visible = true,
-  color = '#0ea5e9'
+  color = '#0ea5e9',
+  interactivePinPlacement = false,
+  onPlaneClick = null
 }) {
   const planeRef = useRef();
 
@@ -32,7 +34,27 @@ export function ClippingPlaneHelper({
   return (
     <group ref={planeRef} position={position} quaternion={quaternion}>
       {/* Semi-transparent Plane Slice Sheet */}
-      <mesh>
+      <mesh
+        onClick={(e) => {
+          if (!interactivePinPlacement || !onPlaneClick) return;
+          e.stopPropagation();
+          if (e.uv) {
+            const localU = (e.uv.x - 0.5) * planeSize;
+            const localV = (e.uv.y - 0.5) * planeSize;
+            onPlaneClick(parseFloat(localU.toFixed(1)), parseFloat(localV.toFixed(1)));
+          }
+        }}
+        onPointerOver={() => {
+          if (interactivePinPlacement) {
+            document.body.style.cursor = 'crosshair';
+          }
+        }}
+        onPointerOut={() => {
+          if (interactivePinPlacement) {
+            document.body.style.cursor = 'auto';
+          }
+        }}
+      >
         <planeGeometry args={[planeSize, planeSize, 16, 16]} />
         <meshBasicMaterial
           color={color}

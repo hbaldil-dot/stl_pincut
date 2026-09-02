@@ -25,8 +25,11 @@ import {
   Sliders,
   Compass,
   ArrowDownUp,
-  CornerDownRight
+  CornerDownRight,
+  Flame
 } from 'lucide-react';
+import { PrintBedHelper } from './PrintBedHelper';
+import { OverhangLegendOverlay } from './OverhangLegendOverlay';
 
 /**
  * Inner Rotatable Model Mesh with Three.js TransformControls rotation rings
@@ -223,7 +226,18 @@ export function Viewport3D({
   // Mesh List Outliner props
   isMeshListOpen = false,
   onToggleMeshList,
-  meshCount = 1
+  meshCount = 1,
+  // Overhang Heat-map props
+  isHeatmapActive = false,
+  onToggleHeatmap,
+  heatmapConfig,
+  onChangeHeatmapConfig,
+  overhangStats,
+  onOpenOverhangTab,
+  // Batch processing props
+  onMultipleFilesDrop,
+  onOpenBatchModal,
+  batchQueueCount = 0
 }) {
   const [isDragOver, setIsDragOver] = useState(false);
   const [cameraPreset, setCameraPreset] = useState(null);
@@ -275,9 +289,11 @@ export function Viewport3D({
     setIsDragOver(false);
 
     if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-      const file = e.dataTransfer.files[0];
-      if (file.name.toLowerCase().endsWith('.stl')) {
-        if (onFileDrop) onFileDrop(file);
+      const files = Array.from(e.dataTransfer.files).filter(f => f.name.toLowerCase().endsWith('.stl'));
+      if (files.length > 1 && onMultipleFilesDrop) {
+        onMultipleFilesDrop(files);
+      } else if (files.length > 0 && onFileDrop) {
+        onFileDrop(files[0]);
       }
     }
   };
@@ -304,6 +320,18 @@ export function Viewport3D({
 
   // Compute helper size based on model bounding radius
   const helperPlaneSize = Math.max(60, (modelInfo?.boundingSphereRadius || 35) * 2.4);
+
+  // Compute center of the cutting plane projected from the model center for snapping alignment
+  const planeCenter = useMemo(() => {
+    if (!model?.geometry) return new THREE.Vector3(0, effOffset, 0);
+    const center = model.geometry.boundingSphere
+      ? model.geometry.boundingSphere.center.clone()
+      : new THREE.Vector3(0, 0, 0);
+    const plane = new THREE.Plane(effNormal.clone().normalize(), -effOffset);
+    const target = new THREE.Vector3();
+    plane.projectPoint(center, target);
+    return target;
+  }, [model, effNormal, effOffset]);
 
   return (
     <div
@@ -385,7 +413,87 @@ export function Viewport3D({
 
         <div className="w-[1px] h-4 bg-gray-700 mx-0.5" />
 
-        {/* Camera Views */}
+        {/* Overhang & Support Heat-map Toggle Button */}
+        <button
+          onClick={onToggleHeatmap}
+          className={`px-2.5 py-1 text-xs font-semibold rounded-lg border transition flex items-center gap-1.5 ${
+            isHeatmapActive
+              ? 'bg-red-600 text-white border-red-400 shadow-lg shadow-red-900/40 ring-2 ring-red-400/40'
+              : 'bg-gray-800 hover:bg-gray-700 text-red-300 border-gray-700'
+          }`}
+          title={
+            isHeatmapActive
+              ? 'Overhang ve Destek Isı Haritasını Kapat'
+              : 'Overhang ve Destek Isı Haritasını Aç (Baskı Yönüne Göre)'
+          }
+        >
+          <Flame className="w-3.5 h-3.5 text-red-400" />
+          <span>Destek Isı Haritası</span>
+          {isHeatmapActive && <span className="w-1.5 h-1.5 rounded-full bg-red-300 animate-ping" />}
+        </button>
+
+        <div className="w-[1px] h-4 bg-gray-700 mx-0.5" />
+
+        {/* Pin Surface Normal Snapping Quick Button */}
+        {pinConfig?.mode !== 'flat' && (
+          <button
+            onClick={() => {
+              const isCurrentlySnapped = pinConfig?.snapToNormal !== false && pinConfig?.snapToCenter !== false;
+              onPinConfigChange?.({
+                snapToNormal: !isCurrentlySnapped,
+                snapToCenter: !isCurrentlySnapped,
+                offsetU: 0,
+                offsetV: 0
+              });
+            }}
+            className={`px-2.5 py-1 text-xs font-semibold rounded-lg border transition flex items-center gap-1.5 ${
+              pinConfig?.snapToNormal !== false && pinConfig?.snapToCenter !== false
+                ? 'bg-emerald-600 text-white border-emerald-400 shadow-lg shadow-emerald-950/40 ring-2 ring-emerald-400/30'
+                : 'bg-gray-800 hover:bg-gray-700 text-emerald-400 border-gray-700'
+            }`}
+            title={
+              pinConfig?.snapToNormal !== false && pinConfig?.snapToCenter !== false
+                ? 'Pim Kitleme: Yüzey Normaline Dik & Merkezde (90° Flush Fit Aktif). Tıklayarak serbest bırakın.'
+                : 'Pimi Kesit Yüzey Normaline ve Merkezine Kitle (90° Flush Fit için tıklayın)'
+            }
+          >
+            <Crosshair className={`w-3.5 h-3.5 ${pinConfig?.snapToNormal !== false && pinConfig?.snapToCenter !== false ? 'text-emerald-200' : 'text-emerald-400'}`} />
+            <span>
+              {pinConfig?.snapToNormal !== false && pinConfig?.snapToCenter !== false
+                ? 'Normal & Merkez Kilitli'
+                : 'Pimi Kitle'}
+            </span>
+            {pinConfig?.snapToNormal !== false && pinConfig?.snapToCenter !== false && (
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-200 animate-pulse" />
+            )}
+          </button>
+        )}
+
+        {/* Batch Processing Queue Toggle Button */}
+        {onOpenBatchModal && (
+          <>
+            <div className="w-[1px] h-4 bg-gray-700 mx-0.5" />
+            <button
+              onClick={onOpenBatchModal}
+              className={`px-2.5 py-1 text-xs font-semibold rounded-lg border transition flex items-center gap-1.5 ${
+                batchQueueCount > 0
+                  ? 'bg-emerald-600 text-white border-emerald-400 shadow-lg shadow-emerald-950/40'
+                  : 'bg-gray-800 hover:bg-gray-700 text-emerald-300 border-gray-700'
+              }`}
+              title="Toplu STL İşleme Kuyruğu (Birden fazla STL modelini aynı ayarlarla kes)"
+            >
+              <Layers className="w-3.5 h-3.5" />
+              <span>Toplu İşleme</span>
+              {batchQueueCount > 0 && (
+                <span className="text-[10px] bg-emerald-950 text-emerald-300 border border-emerald-500/50 font-mono px-1.5 py-0.2 rounded-full font-bold">
+                  {batchQueueCount}
+                </span>
+              )}
+            </button>
+          </>
+        )}
+
+        <div className="w-[1px] h-4 bg-gray-700 mx-0.5" />
         <button
           onClick={() => setCameraPreset('iso')}
           className="px-2 py-1 text-[11px] font-semibold bg-gray-800 hover:bg-gray-700 text-gray-300 rounded-lg border border-gray-700 transition"
@@ -830,13 +938,34 @@ export function Viewport3D({
 
               {/* 3D Clipping Plane Visual Helper Sheet */}
               {activeMode === 'plane' && clippingConfig?.enabled && (
-                <ClippingPlaneHelper
-                  planeNormal={effNormal}
-                  planeOffset={effOffset}
-                  planeSize={helperPlaneSize}
-                  visible={clippingConfig.showPlaneHelper}
-                  color="#0ea5e9"
-                />
+                <>
+                  <ClippingPlaneHelper
+                    planeNormal={effNormal}
+                    planeOffset={effOffset}
+                    planeSize={helperPlaneSize}
+                    visible={clippingConfig.showPlaneHelper}
+                    color="#0ea5e9"
+                    interactivePinPlacement={clippingConfig.addPinOnSlice && pinConfig?.mode !== 'flat'}
+                    onPlaneClick={(u, v) => {
+                      onPinConfigChange?.({
+                        offsetU: u,
+                        offsetV: v,
+                        snapToCenter: false
+                      }, false);
+                    }}
+                  />
+
+                  {/* Live Alignment Pin Snapped to Cut-Plane Surface Normal & Center */}
+                  {clippingConfig.addPinOnSlice && pinConfig?.mode !== 'flat' && (
+                    <PinGizmo
+                      planeNormal={effNormal}
+                      planeCenter={planeCenter}
+                      pinConfig={pinConfig}
+                      onPinConfigChange={onPinConfigChange}
+                      showSnappingGuide={true}
+                    />
+                  )}
+                </>
               )}
 
               {/* Lasso Drawing Layer (when in Lasso Mode) */}
@@ -876,6 +1005,15 @@ export function Viewport3D({
           )
         )}
 
+        {/* 3D Visual Print Bed & Orientation Arrow Helper */}
+        {isHeatmapActive && heatmapConfig?.showBuildPlate && (
+          <PrintBedHelper
+            printDirection={heatmapConfig.printDirection}
+            modelInfo={modelInfo}
+            visible={true}
+          />
+        )}
+
         {/* Scene Controller Helper for camera presets, clipping and orientation */}
         <SceneController
           cameraPreset={cameraPreset}
@@ -899,6 +1037,37 @@ export function Viewport3D({
           zoomSpeed={1.0}
         />
       </Canvas>
+
+      {/* Overhang Heat-map HUD Legend Overlay */}
+      <OverhangLegendOverlay
+        enabled={isHeatmapActive}
+        onClose={onToggleHeatmap}
+        stats={overhangStats}
+        thresholdDeg={heatmapConfig?.thresholdDeg || 45}
+        warnRangeDeg={heatmapConfig?.warnRangeDeg || 10}
+        mode={heatmapConfig?.mode || 0}
+        onChangeMode={(newMode) => onChangeHeatmapConfig && onChangeHeatmapConfig({ mode: newMode })}
+        printDirectionName={
+          heatmapConfig?.presetId === 'custom'
+            ? 'Özel Yön'
+            : heatmapConfig?.presetId === 'down_y'
+            ? '-Y (Ters Baskı)'
+            : heatmapConfig?.presetId === 'front_z'
+            ? '+Z (Ön Yüz)'
+            : heatmapConfig?.presetId === 'back_z'
+            ? '-Z (Arka Yüz)'
+            : heatmapConfig?.presetId === 'right_x'
+            ? '+X (Sağ Yan)'
+            : heatmapConfig?.presetId === 'left_x'
+            ? '-X (Sol Yan)'
+            : '+Y (Varsayılan Üst)'
+        }
+        showBuildPlate={heatmapConfig?.showBuildPlate}
+        onToggleBuildPlate={() =>
+          onChangeHeatmapConfig && onChangeHeatmapConfig({ showBuildPlate: !heatmapConfig?.showBuildPlate })
+        }
+        onOpenOverhangTab={onOpenOverhangTab}
+      />
     </div>
   );
 }

@@ -6,6 +6,7 @@ import * as THREE from 'three';
 export function createWorkspaceSnapshot({
   description = 'İşlem',
   type = 'GENERAL',
+  subType = null,
   splitResult = null,
   pinConfig = {},
   clippingConfig = {},
@@ -22,6 +23,7 @@ export function createWorkspaceSnapshot({
   return {
     id: `${Date.now()}-${Math.random().toString(36).substr(2, 6)}`,
     type,
+    subType,
     description,
     timestamp: Date.now(),
     state: {

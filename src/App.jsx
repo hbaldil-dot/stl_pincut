@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useMemo } from 'react';
 import * as THREE from 'three';
 import { Viewport3D } from './components/Viewport3D';
 import { ControlsPanel } from './components/ControlsPanel';
@@ -6,15 +6,22 @@ import { ModelInspector } from './components/ModelInspector';
 import { ExportModal } from './components/ExportModal';
 import { HistoryPanel } from './components/HistoryPanel';
 import { MeshListPanel } from './components/MeshListPanel';
+import { BatchProcessingModal } from './components/BatchProcessingModal';
 import { loadSamplePreset, parseCustomSTL, MATERIAL_THEMES } from './utils/stlLoaderHelper';
+import { SAMPLE_PRESETS } from './utils/sampleModels';
 import { sliceMeshWithPlane, sliceMeshWithLasso } from './utils/meshSlicer';
 import { createWorkspaceSnapshot, restoreWorkspaceSnapshot } from './utils/historyManager';
 import {
   downloadMeshSTL,
   downloadCombinedSTL,
   downloadAllPartsZip,
+  downloadBatchProcessedZip,
   calculateGeometryStats
 } from './utils/stlExporter';
+import {
+  createSupportHeatmapMaterial,
+  calculateOverhangStatistics
+} from './utils/supportHeatmap';
 import {
   Download,
   Scissors,
@@ -28,7 +35,8 @@ import {
   Ruler,
   Undo2,
   Redo2,
-  History
+  History,
+  Flame
 } from 'lucide-react';
 
 export function App() {
@@ -64,7 +72,7 @@ export function App() {
   const [loopPoints, setLoopPoints] = useState([]);
   const [isShiftPressed, setIsShiftPressed] = useState(false);
 
-  // Alignment Pin & Hole Configuration
+  // Alignment Pin & Hole Configuration with Surface Normal Snapping & Flush Fitting
   const [pinConfig, setPinConfig] = useState({
     mode: 'pin_and_hole', // 'pin_and_hole' | 'holes_both' | 'hole_only' | 'pin_only' | 'flat'
     diameter: 8.0,
@@ -73,7 +81,13 @@ export function App() {
     height: 10.0,
     clearance: 0.2, // mm 3D print fit tolerance
     type: 'cylinder', // 'cylinder' | 'pyramid' | 'hex'
-    taper: 0.85
+    taper: 0.85,
+    snapToNormal: true,     // Force pin axis collinear with cut-plane surface normal (90° flush fit)
+    snapToCenter: true,     // Force pin center to geometric centroid of planar cut section
+    flushFit: true,         // Guarantee zero-gap flush mating between cut sections
+    offsetU: 0,             // Tangent coordinate offset U (mm) on cut plane
+    offsetV: 0,             // Tangent coordinate offset V (mm) on cut plane
+    magneticThreshold: 3.0  // Magnetic snap snap-to-center threshold in mm
   });
 
   // Model 3D Rotation & Alignment State
@@ -100,6 +114,29 @@ export function App() {
   const [isMeshListOpen, setIsMeshListOpen] = useState(false);
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
   const [showPostCutBanner, setShowPostCutBanner] = useState(false);
+  const [activeControlsTab, setActiveControlsTab] = useState('slice');
+
+  // Overhang Heat-map and Print Orientation state
+  const [heatmapConfig, setHeatmapConfig] = useState({
+    enabled: false,
+    thresholdDeg: 45,
+    warnRangeDeg: 10,
+    mode: 0, // 0: Thermal, 1: Highlight, 2: Zebra
+    presetId: 'up_y',
+    printDirection: new THREE.Vector3(0, 1, 0),
+    customPitch: 0,
+    customYaw: 0,
+    customRoll: 0,
+    showBuildPlate: true
+  });
+
+  // STL Export Configuration (Mesh density / decimation ratio & Binary/ASCII format)
+  const [exportConfig, setExportConfig] = useState({
+    format: 'binary',
+    density: 1.0,
+    preset: 'original',
+    decimalPrecision: 4
+  });
 
   // Per-Mesh display & material customization configs
   // Map of meshId -> { visible: boolean, wireframe: boolean, opacity: number, materialTheme: object|null, customColor: string|null }
@@ -116,22 +153,35 @@ export function App() {
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
   const isRestoringRef = useRef(false);
   const lastActionTimeRef = useRef(0);
+  const lastSubTypeRef = useRef(null);
+
+  // Batch Processing Queue State
+  const [isBatchModalOpen, setIsBatchModalOpen] = useState(false);
+  const [batchQueue, setBatchQueue] = useState([]);
+  const [isBatchProcessing, setIsBatchProcessing] = useState(false);
+  const [currentBatchProcessingId, setCurrentBatchProcessingId] = useState(null);
+  const [isExportingBatchAll, setIsExportingBatchAll] = useState(false);
+  const cancelBatchRef = useRef(false);
 
   const controlsRef = useRef(null);
 
   /**
    * Pushes a new snapshot onto the Undo/Redo history stack
    */
-  const pushHistory = (description, type, overrides = {}) => {
+  const pushHistory = (description, type, overrides = {}, subType = null, isContinuous = false) => {
     if (isRestoringRef.current) return;
+
+    const currentClipping = overrides.clippingConfig !== undefined ? overrides.clippingConfig : clippingConfig;
+    const currentPin = overrides.pinConfig !== undefined ? overrides.pinConfig : pinConfig;
 
     const snapshot = createWorkspaceSnapshot({
       description,
       type,
+      subType,
       modelRotation: overrides.modelRotation !== undefined ? overrides.modelRotation : modelRotation,
       splitResult: overrides.splitResult !== undefined ? overrides.splitResult : splitResult,
-      pinConfig: overrides.pinConfig !== undefined ? overrides.pinConfig : pinConfig,
-      clippingConfig: overrides.clippingConfig !== undefined ? overrides.clippingConfig : clippingConfig,
+      pinConfig: currentPin,
+      clippingConfig: currentClipping,
       drawnPoints: overrides.drawnPoints !== undefined ? overrides.drawnPoints : drawnPoints,
       isLoopClosed: overrides.isLoopClosed !== undefined ? overrides.isLoopClosed : isLoopClosed,
       loopPoints: overrides.loopPoints !== undefined ? overrides.loopPoints : loopPoints,
@@ -142,34 +192,40 @@ export function App() {
       explodedDistance: overrides.explodedDistance !== undefined ? overrides.explodedDistance : explodedDistance
     });
 
-    setHistory((prev) => {
-      const currentIdx = historyIndex;
-      const truncated = prev.slice(0, currentIdx + 1);
+    const now = Date.now();
+    const currentIdx = historyIndex;
+    const last = currentIdx >= 0 && currentIdx < history.length ? history[currentIdx] : null;
 
-      // Debounce continuous slider changes (e.g. diameter, rotation, offset)
-      const last = truncated[truncated.length - 1];
-      const now = Date.now();
-      if (
-        last &&
-        last.type === type &&
-        (type === 'PIN_CONFIG' || type === 'CLIPPING_CONFIG' || type === 'EXPLODED_DISTANCE' || type === 'MODEL_ROTATE') &&
-        now - lastActionTimeRef.current < 900
-      ) {
-        lastActionTimeRef.current = now;
-        truncated[truncated.length - 1] = snapshot;
-        return truncated;
-      }
+    const shouldCoalesce =
+      isContinuous &&
+      last &&
+      last.type === type &&
+      last.subType &&
+      subType &&
+      last.subType === subType &&
+      now - lastActionTimeRef.current < 800;
 
-      lastActionTimeRef.current = now;
-      const next = [...truncated, snapshot];
-      if (next.length > 50) next.shift();
-      return next;
-    });
+    lastActionTimeRef.current = now;
+    lastSubTypeRef.current = subType;
 
-    setHistoryIndex((prev) => {
-      const nextIdx = Math.min(prev + 1, 49);
-      return nextIdx;
-    });
+    if (shouldCoalesce) {
+      setHistory((prev) => {
+        const copy = [...prev];
+        copy[currentIdx] = snapshot;
+        return copy;
+      });
+    } else {
+      setHistory((prev) => {
+        const truncated = prev.slice(0, currentIdx + 1);
+        const next = [...truncated, snapshot];
+        if (next.length > 50) next.shift();
+        return next;
+      });
+      setHistoryIndex((prev) => {
+        const nextIdx = Math.min(prev + 1, 49);
+        return nextIdx;
+      });
+    }
   };
 
   /**
@@ -217,12 +273,18 @@ export function App() {
   const canUndo = historyIndex > 0;
   const canRedo = historyIndex < history.length - 1;
 
+  const undoActionDesc = historyIndex > 0 && history[historyIndex] ? history[historyIndex].description : null;
+  const redoActionDesc = historyIndex < history.length - 1 && history[historyIndex + 1] ? history[historyIndex + 1].description : null;
+  const undoTooltip = canUndo ? `Geri Al (Ctrl+Z): ${undoActionDesc || ''}` : 'Geri Alınacak işlem yok';
+  const redoTooltip = canRedo ? `Yinele (Ctrl+Y): ${redoActionDesc || ''}` : 'Yinelenecek işlem yok';
+
   const handleUndo = () => {
     if (historyIndex > 0) {
       const targetIdx = historyIndex - 1;
       const targetSnapshot = history[targetIdx];
+      const undoneSnapshot = history[historyIndex];
       setHistoryIndex(targetIdx);
-      applySnapshot(targetSnapshot, `Geri Alındı: ${targetSnapshot.description}`);
+      applySnapshot(targetSnapshot, `Geri Alındı: ${undoneSnapshot ? undoneSnapshot.description : targetSnapshot.description}`);
     }
   };
 
@@ -256,12 +318,13 @@ export function App() {
     loadPresetModel('bunny', 'Stanford Bunny');
   }, []);
 
-  // Update plane normal whenever axis or custom rotation changes
-  const handleClippingConfigChange = (changes) => {
+  // Update plane normal whenever axis, custom rotation, offset, or toggles change
+  const handleClippingConfigChange = (changes, isContinuous = false) => {
+    let nextNormal = new THREE.Vector3(0, 1, 0);
+    let nextConfig = null;
+
     setClippingConfig((prev) => {
       const next = { ...prev, ...changes };
-
-      let nextNormal = new THREE.Vector3(0, 1, 0);
 
       if (next.axis === 'x') {
         nextNormal.set(1, 0, 0);
@@ -278,19 +341,61 @@ export function App() {
       }
 
       next.normal = nextNormal;
+      nextConfig = next;
       return next;
     });
 
-    if (changes.axis || changes.negate !== undefined || changes.offset !== undefined) {
-      const desc = changes.axis
-        ? `Kesit Düzlemi: ${changes.axis.toUpperCase()} Ekseni`
-        : changes.negate !== undefined
-        ? 'Düzlem Yönü Ters Çevrildi'
-        : `Düzlem Konumu: ${changes.offset?.toFixed(1)} mm`;
-      pushHistory(desc, 'CLIPPING_CONFIG', {
-        clippingConfig: { ...clippingConfig, ...changes }
-      });
+    if (!nextConfig) {
+      const merged = { ...clippingConfig, ...changes };
+      if (merged.axis === 'x') nextNormal.set(1, 0, 0);
+      else if (merged.axis === 'y') nextNormal.set(0, 1, 0);
+      else if (merged.axis === 'z') nextNormal.set(0, 0, 1);
+      else if (merged.axis === 'custom') {
+        const radX = THREE.MathUtils.degToRad(merged.rotX || 0);
+        const radY = THREE.MathUtils.degToRad(merged.rotY || 0);
+        const radZ = THREE.MathUtils.degToRad(merged.rotZ || 0);
+        const euler = new THREE.Euler(radX, radY, radZ, 'XYZ');
+        nextNormal.set(0, 1, 0).applyEuler(euler).normalize();
+      }
+      merged.normal = nextNormal;
+      nextConfig = merged;
     }
+
+    let desc = 'Kesit Düzlemi Güncellendi';
+    let subType = 'clipping_general';
+
+    if (changes.axis) {
+      desc = changes.axis === 'custom' ? 'Kesit Düzlemi: Serbest Açı' : `Kesit Düzlemi: ${changes.axis.toUpperCase()} Ekseni`;
+      subType = 'clipping_axis';
+      isContinuous = false;
+    } else if (changes.negate !== undefined) {
+      desc = changes.negate ? 'Düzlem Yönü Ters Çevrildi' : 'Düzlem Normal Yönü';
+      subType = 'clipping_negate';
+      isContinuous = false;
+    } else if (changes.offset !== undefined) {
+      desc = `Düzlem Konumu: ${changes.offset?.toFixed(1)} mm`;
+      subType = 'clipping_offset';
+    } else if (changes.rotX !== undefined || changes.rotY !== undefined || changes.rotZ !== undefined) {
+      const rx = Math.round(nextConfig.rotX || 0);
+      const ry = Math.round(nextConfig.rotY || 0);
+      const rz = Math.round(nextConfig.rotZ || 0);
+      desc = `Düzlem Açısı: X:${rx}° Y:${ry}° Z:${rz}°`;
+      subType = 'clipping_rot';
+    } else if (changes.enabled !== undefined) {
+      desc = changes.enabled ? 'Canlı Kesit Düzlemi Açıldı' : 'Canlı Kesit Düzlemi Kapatıldı';
+      subType = 'clipping_enabled';
+      isContinuous = false;
+    } else if (changes.showPlaneHelper !== undefined) {
+      desc = changes.showPlaneHelper ? 'Düzlem Kılavuzu Açıldı' : 'Düzlem Kılavuzu Gizlendi';
+      subType = 'clipping_helper';
+      isContinuous = false;
+    } else if (changes.addPinOnSlice !== undefined) {
+      desc = changes.addPinOnSlice ? 'Kesimde Pim Ekleme: Açık' : 'Kesimde Pim Ekleme: Kapalı';
+      subType = 'clipping_add_pin';
+      isContinuous = false;
+    }
+
+    pushHistory(desc, 'CLIPPING_CONFIG', { clippingConfig: nextConfig }, subType, isContinuous);
   };
 
   // Sync Three.js Clipping Planes on model material
@@ -321,17 +426,17 @@ export function App() {
       if (e.key === 'Shift') setIsShiftPressed(true);
 
       // Undo / Redo Shortcuts (Ctrl+Z, Ctrl+Shift+Z, Ctrl+Y, Cmd+Z, Cmd+Shift+Z, Cmd+Y)
-      if (e.key === 'z' && (e.ctrlKey || e.metaKey)) {
+      if ((e.key === 'z' || e.key === 'Z') && (e.ctrlKey || e.metaKey)) {
         e.preventDefault();
         if (e.shiftKey) {
           handleRedo();
         } else {
           handleUndo();
         }
-      } else if (e.key === 'y' && (e.ctrlKey || e.metaKey)) {
+      } else if ((e.key === 'y' || e.key === 'Y') && (e.ctrlKey || e.metaKey)) {
         e.preventDefault();
         handleRedo();
-      } else if (e.key === 'h' && (e.ctrlKey || e.metaKey)) {
+      } else if ((e.key === 'h' || e.key === 'H') && (e.ctrlKey || e.metaKey)) {
         e.preventDefault();
         setIsHistoryOpen((prev) => !prev);
       }
@@ -352,7 +457,7 @@ export function App() {
         if (activeMode === 'lasso') {
           setIsDrawing((prev) => !prev);
         } else {
-          setClippingConfig((prev) => ({ ...prev, enabled: !prev.enabled }));
+          handleClippingConfigChange({ enabled: !clippingConfig.enabled }, false);
         }
       }
     };
@@ -367,7 +472,7 @@ export function App() {
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
     };
-  }, [history, historyIndex, activeMode, isMeasureActive]);
+  }, [history, historyIndex, activeMode, isMeasureActive, clippingConfig]);
 
   /**
    * Measurement tool handlers
@@ -457,7 +562,12 @@ export function App() {
   /**
    * Synchronizes visual properties (visibility, wireframe, opacity, material) to Three.js meshes
    */
-  const applyMeshPropertiesToScene = (configs, currentTheme = materialTheme, globalWireframe = isWireframe) => {
+  const applyMeshPropertiesToScene = (
+    configs,
+    currentTheme = materialTheme,
+    globalWireframe = isWireframe,
+    currentHeatmap = heatmapConfig
+  ) => {
     // 1. Single Main Model
     if (model) {
       const cfg = configs.mainModel || {};
@@ -467,7 +577,19 @@ export function App() {
       const effectiveTheme = cfg.materialTheme || currentTheme;
       const effectiveColor = cfg.customColor || null;
 
-      model.material = createMaterialForTheme(effectiveTheme, effectiveWireframe, effectiveOpacity, effectiveColor);
+      if (currentHeatmap?.enabled) {
+        model.material = createSupportHeatmapMaterial({
+          printDirection: currentHeatmap.printDirection,
+          thresholdDeg: currentHeatmap.thresholdDeg,
+          warnRangeDeg: currentHeatmap.warnRangeDeg,
+          mode: currentHeatmap.mode,
+          baseColor: effectiveColor || effectiveTheme?.color || '#2dafa5',
+          opacity: effectiveOpacity,
+          wireframe: effectiveWireframe
+        });
+      } else {
+        model.material = createMaterialForTheme(effectiveTheme, effectiveWireframe, effectiveOpacity, effectiveColor);
+      }
       model.material.clippingPlanes = clippingConfig.enabled && !splitResult ? [new THREE.Plane()] : [];
       model.material.needsUpdate = true;
     }
@@ -482,7 +604,19 @@ export function App() {
         const themeA = cfgA.materialTheme || { name: 'Part A (Pin)', color: '#38bdf8', roughness: 0.3, metalness: 0.2 };
         const colorA = cfgA.customColor || null;
 
-        splitResult.partA.material = createMaterialForTheme(themeA, effectiveWireframeA, effectiveOpacityA, colorA);
+        if (currentHeatmap?.enabled) {
+          splitResult.partA.material = createSupportHeatmapMaterial({
+            printDirection: currentHeatmap.printDirection,
+            thresholdDeg: currentHeatmap.thresholdDeg,
+            warnRangeDeg: currentHeatmap.warnRangeDeg,
+            mode: currentHeatmap.mode,
+            baseColor: colorA || themeA.color || '#38bdf8',
+            opacity: effectiveOpacityA,
+            wireframe: effectiveWireframeA
+          });
+        } else {
+          splitResult.partA.material = createMaterialForTheme(themeA, effectiveWireframeA, effectiveOpacityA, colorA);
+        }
         splitResult.partA.material.needsUpdate = true;
       }
 
@@ -494,7 +628,19 @@ export function App() {
         const themeB = cfgB.materialTheme || { name: 'Part B (Socket)', color: '#a855f7', roughness: 0.3, metalness: 0.2 };
         const colorB = cfgB.customColor || null;
 
-        splitResult.partB.material = createMaterialForTheme(themeB, effectiveWireframeB, effectiveOpacityB, colorB);
+        if (currentHeatmap?.enabled) {
+          splitResult.partB.material = createSupportHeatmapMaterial({
+            printDirection: currentHeatmap.printDirection,
+            thresholdDeg: currentHeatmap.thresholdDeg,
+            warnRangeDeg: currentHeatmap.warnRangeDeg,
+            mode: currentHeatmap.mode,
+            baseColor: colorB || themeB.color || '#a855f7',
+            opacity: effectiveOpacityB,
+            wireframe: effectiveWireframeB
+          });
+        } else {
+          splitResult.partB.material = createMaterialForTheme(themeB, effectiveWireframeB, effectiveOpacityB, colorB);
+        }
         splitResult.partB.material.needsUpdate = true;
       }
     }
@@ -502,8 +648,68 @@ export function App() {
 
   // Re-apply mesh properties when configs change
   useEffect(() => {
-    applyMeshPropertiesToScene(meshConfigs, materialTheme, isWireframe);
-  }, [meshConfigs, model, splitResult]);
+    applyMeshPropertiesToScene(meshConfigs, materialTheme, isWireframe, heatmapConfig);
+  }, [meshConfigs, materialTheme, isWireframe, heatmapConfig, model, splitResult]);
+
+  // Overhang & Support Statistics Calculation
+  const overhangStats = useMemo(() => {
+    if (!heatmapConfig.enabled) return null;
+    const targetGeom = splitResult?.partA?.geometry || model?.geometry;
+    if (!targetGeom) return null;
+    return calculateOverhangStatistics(
+      targetGeom,
+      heatmapConfig.printDirection,
+      heatmapConfig.thresholdDeg,
+      heatmapConfig.warnRangeDeg,
+      modelRotation
+    );
+  }, [
+    heatmapConfig.enabled,
+    heatmapConfig.printDirection,
+    heatmapConfig.thresholdDeg,
+    heatmapConfig.warnRangeDeg,
+    modelRotation,
+    model,
+    splitResult
+  ]);
+
+  const handleToggleHeatmap = () => {
+    setHeatmapConfig((prev) => {
+      const nextEnabled = !prev.enabled;
+      setStatusMessage(
+        nextEnabled
+          ? 'Destek & Overhang Isı Haritası aktif edildi.'
+          : 'Destek Isı Haritası kapatıldı.'
+      );
+      return { ...prev, enabled: nextEnabled };
+    });
+  };
+
+  const handleChangeHeatmapConfig = (updates) => {
+    setHeatmapConfig((prev) => ({
+      ...prev,
+      ...updates
+    }));
+  };
+
+  const handleApplyModelRotationAsPrintDir = () => {
+    const euler = new THREE.Euler(
+      THREE.MathUtils.degToRad(modelRotation.x || 0),
+      THREE.MathUtils.degToRad(modelRotation.y || 0),
+      THREE.MathUtils.degToRad(modelRotation.z || 0),
+      'XYZ'
+    );
+    const vec = new THREE.Vector3(0, 1, 0).applyEuler(euler).normalize();
+    setHeatmapConfig((prev) => ({
+      ...prev,
+      presetId: 'custom',
+      printDirection: vec,
+      customPitch: Math.round(modelRotation.x || 0),
+      customYaw: Math.round(modelRotation.y || 0),
+      customRoll: Math.round(modelRotation.z || 0)
+    }));
+    setStatusMessage('Baskı yönü modelin mevcut açılarına hizalandı.');
+  };
 
   const handleUpdateMeshConfig = (meshId, updates) => {
     setMeshConfigs((prev) => {
@@ -623,12 +829,226 @@ export function App() {
   };
 
   /**
-   * Handles user uploaded custom STL file
+   * Handles user uploaded custom STL file (supports multiple files for batch queue)
    */
   const handleFileUpload = (e) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    handleProcessSTLFile(file);
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
+    if (files.length > 1) {
+      handleAddBatchFiles(files);
+      setIsBatchModalOpen(true);
+      return;
+    }
+    handleProcessSTLFile(files[0]);
+  };
+
+  // Batch Queue Handlers
+  const handleAddBatchFiles = (files) => {
+    if (!files || files.length === 0) return;
+    const newItems = Array.from(files)
+      .filter(f => f.name.toLowerCase().endsWith('.stl'))
+      .map(file => ({
+        id: `file_${Date.now()}_${Math.random().toString(36).substr(2, 7)}`,
+        name: file.name,
+        size: file.size,
+        file: file,
+        isPreset: false,
+        status: 'pending',
+        progress: 0,
+        statusText: 'Bekliyor',
+        result: null,
+        error: null
+      }));
+    if (newItems.length > 0) {
+      setBatchQueue(prev => [...prev, ...newItems]);
+      setStatusMessage(`${newItems.length} STL modeli toplu işleme kuyruğuna eklendi.`);
+    }
+  };
+
+  const handleAddAllBatchPresets = () => {
+    const newItems = SAMPLE_PRESETS.map(p => ({
+      id: `preset_${p.id}_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
+      name: `${p.name}.stl`,
+      size: 150000,
+      file: null,
+      isPreset: true,
+      presetId: p.id,
+      status: 'pending',
+      progress: 0,
+      statusText: 'Bekliyor',
+      result: null,
+      error: null
+    }));
+    setBatchQueue(prev => [...prev, ...newItems]);
+    setStatusMessage('Tüm 4 örnek model toplu işleme kuyruğuna eklendi.');
+  };
+
+  const handleClearBatchQueue = () => {
+    if (isBatchProcessing) return;
+    setBatchQueue([]);
+    setStatusMessage('Toplu işleme kuyruğu temizlendi.');
+  };
+
+  const handleLoadBatchItemInViewport = (item) => {
+    if (!item?.result) return;
+    try {
+      const res = item.result;
+      const originalMesh = res.originalMesh;
+      const originalInfo = res.originalInfo;
+
+      if (originalMesh) {
+        originalMesh.material = createMaterialForTheme(materialTheme, isWireframe);
+        setModel(originalMesh);
+      }
+      setModelName(item.name);
+      if (originalInfo) {
+        setModelInfo(originalInfo);
+        setFaceCount(originalInfo.triangles);
+      }
+      setSplitResult(res);
+      setShowPostCutBanner(true);
+      setIsBatchModalOpen(false);
+
+      pushHistory(`${item.name} Kesim Sonucu Sahneye Yüklendi`, 'BATCH_ITEM_LOAD', {
+        splitResult: res,
+        modelRotation: { x: 0, y: 0, z: 0 }
+      });
+
+      setStatusMessage(`${item.name} 3D sahnede aktif edildi.`);
+    } catch (err) {
+      console.error(err);
+      setStatusMessage('Model sahneye yüklenirken hata oluştu.');
+    }
+  };
+
+  const handleStartBatchProcessing = async () => {
+    if (batchQueue.length === 0 || isBatchProcessing) return;
+    setIsBatchProcessing(true);
+    cancelBatchRef.current = false;
+
+    const effNormal = new THREE.Vector3(
+      clippingConfig.axis === 'x' ? 1 : 0,
+      clippingConfig.axis === 'y' ? 1 : 0,
+      clippingConfig.axis === 'z' ? 1 : 0
+    );
+    if (clippingConfig.negate) {
+      effNormal.negate();
+    }
+    const effOffset = clippingConfig.negate ? -clippingConfig.offset : clippingConfig.offset;
+
+    let currentQueue = [...batchQueue];
+
+    for (let i = 0; i < currentQueue.length; i++) {
+      if (cancelBatchRef.current) {
+        setStatusMessage('Toplu işleme durduruldu.');
+        break;
+      }
+      const item = currentQueue[i];
+      if (item.status === 'completed') continue;
+
+      setCurrentBatchProcessingId(item.id);
+      currentQueue[i] = {
+        ...currentQueue[i],
+        status: 'processing',
+        progress: 25,
+        statusText: 'STL ayrıştırılıyor...'
+      };
+      setBatchQueue([...currentQueue]);
+      await new Promise(r => setTimeout(r, 40));
+
+      try {
+        let mesh, info;
+        if (item.isPreset) {
+          const loaded = loadSamplePreset(item.presetId);
+          mesh = loaded.mesh;
+          info = loaded.info;
+        } else if (item.file) {
+          const buffer = await item.file.arrayBuffer();
+          const parsed = parseCustomSTL(buffer, item.name);
+          mesh = parsed.mesh;
+          info = parsed.info;
+        } else {
+          throw new Error('Dosya kaynağı geçersiz.');
+        }
+
+        currentQueue[i] = {
+          ...currentQueue[i],
+          progress: 60,
+          statusText: 'Düzlem boyunca kesiliyor ve pim yuvaları açılıyor...'
+        };
+        setBatchQueue([...currentQueue]);
+        await new Promise(r => setTimeout(r, 40));
+
+        const result = sliceMeshWithPlane(
+          mesh,
+          effNormal,
+          effOffset,
+          pinConfig,
+          clippingConfig.addPinOnSlice
+        );
+
+        currentQueue[i] = {
+          ...currentQueue[i],
+          status: 'completed',
+          progress: 100,
+          statusText: `Tamamlandı (${result.cutAreaCm2?.toFixed(1) || 0} cm²)`,
+          result: {
+            ...result,
+            originalMesh: mesh,
+            originalInfo: info
+          },
+          error: null
+        };
+        setBatchQueue([...currentQueue]);
+      } catch (err) {
+        console.error(`Batch processing error on ${item.name}:`, err);
+        currentQueue[i] = {
+          ...currentQueue[i],
+          status: 'error',
+          progress: 100,
+          statusText: 'Hata',
+          error: err.message || 'Kesim sırasında hata oluştu.'
+        };
+        setBatchQueue([...currentQueue]);
+      }
+
+      await new Promise(r => setTimeout(r, 50));
+    }
+
+    setCurrentBatchProcessingId(null);
+    setIsBatchProcessing(false);
+    if (!cancelBatchRef.current) {
+      setStatusMessage('Toplu kesim işlemi tamamlandı.');
+    }
+  };
+
+  const handleCancelBatchProcessing = () => {
+    cancelBatchRef.current = true;
+    setIsBatchProcessing(false);
+    setCurrentBatchProcessingId(null);
+  };
+
+  const handleDownloadAllBatchZip = async () => {
+    const completedItems = batchQueue.filter(item => item.status === 'completed' && item.result);
+    if (completedItems.length === 0) {
+      setStatusMessage('İndirilecek tamamlanmış model bulunmuyor.');
+      return;
+    }
+    setIsExportingBatchAll(true);
+    setStatusMessage('Toplu STL dosyaları ZIP olarak paketleniyor...');
+    try {
+      await downloadBatchProcessedZip(
+        completedItems,
+        { clippingConfig, pinConfig },
+        exportConfig
+      );
+      setStatusMessage(`${completedItems.length} modelin tüm parçaları tek ZIP olarak indirildi!`);
+    } catch (err) {
+      console.error(err);
+      setStatusMessage('Toplu ZIP indirme sırasında hata oluştu.');
+    } finally {
+      setIsExportingBatchAll(false);
+    }
   };
 
   const handleProcessSTLFile = (file) => {
@@ -799,11 +1219,13 @@ export function App() {
     });
   };
 
-  const handlePinConfigChange = (changes) => {
+  const handlePinConfigChange = (changes, isContinuous = false) => {
     const nextPin = { ...pinConfig, ...changes };
     setPinConfig(nextPin);
 
     let desc = 'Pim/Delik Ayarı Güncellendi';
+    let subType = 'pin_general';
+
     if (changes.mode) {
       const modeLabel =
         changes.mode === 'holes_both'
@@ -816,17 +1238,62 @@ export function App() {
           ? 'Yalnızca Pim'
           : 'Düz Kesim';
       desc = `Bağlantı Modu: ${modeLabel}`;
-    } else if (changes.diameter !== undefined) {
-      desc = `Pim Çapı: Ø${changes.diameter} mm`;
-    } else if (changes.depth !== undefined) {
-      desc = `Pim Derinliği: ${changes.depth} mm`;
+      subType = 'pin_mode';
+      isContinuous = false;
+    } else if (changes.diameter !== undefined || changes.size !== undefined) {
+      const d = changes.diameter ?? changes.size;
+      desc = `Pim Çapı: Ø${d} mm`;
+      subType = 'pin_diameter';
+    } else if (changes.depth !== undefined || changes.height !== undefined) {
+      const dp = changes.depth ?? changes.height;
+      desc = `Pim Derinliği: ${dp} mm`;
+      subType = 'pin_depth';
     } else if (changes.clearance !== undefined) {
-      desc = `Fit Boşluğu: ${changes.clearance} mm`;
+      desc = `Fit Toleransı: +${changes.clearance.toFixed(2)} mm`;
+      subType = 'pin_clearance';
+      isContinuous = false;
     } else if (changes.type) {
-      desc = `Pim Geometrisi: ${changes.type}`;
+      const typeLabel =
+        changes.type === 'hex'
+          ? 'Altıgen'
+          : changes.type === 'square'
+          ? 'Kare'
+          : changes.type === 'countersink'
+          ? 'Havşalı'
+          : changes.type === 'pyramid'
+          ? 'Piramit'
+          : 'Silindirik';
+      desc = `Pim Geometrisi: ${typeLabel}`;
+      subType = 'pin_type';
+      isContinuous = false;
+    } else if (changes.snapToNormal !== undefined && changes.snapToCenter !== undefined && changes.snapToNormal && changes.snapToCenter) {
+      desc = 'Pim Merkeze ve Yüzey Normaline Kitlendi (90° Flush)';
+      subType = 'pin_snap_all';
+      isContinuous = false;
+    } else if (changes.snapToNormal !== undefined) {
+      desc = changes.snapToNormal ? 'Yüzey Normaline Kitle: Açık (90° Dik)' : 'Yüzey Normaline Kitle: Serbest';
+      subType = 'pin_snap_normal';
+      isContinuous = false;
+    } else if (changes.snapToCenter !== undefined) {
+      desc = changes.snapToCenter ? 'Kesit Merkezine Kitle: Açık' : 'Kesit Merkezine Kitle: Serbest';
+      subType = 'pin_snap_center';
+      isContinuous = false;
+    } else if (changes.offsetU !== undefined && changes.offsetV !== undefined) {
+      desc = `Pim Konumu: U:${changes.offsetU > 0 ? '+' : ''}${changes.offsetU.toFixed(1)} V:${changes.offsetV > 0 ? '+' : ''}${changes.offsetV.toFixed(1)} mm`;
+      subType = 'pin_offset_both';
+    } else if (changes.offsetU !== undefined) {
+      desc = `Pim U-Konumu: ${changes.offsetU > 0 ? '+' : ''}${changes.offsetU.toFixed(1)} mm`;
+      subType = 'pin_offset_u';
+    } else if (changes.offsetV !== undefined) {
+      desc = `Pim V-Konumu: ${changes.offsetV > 0 ? '+' : ''}${changes.offsetV.toFixed(1)} mm`;
+      subType = 'pin_offset_v';
+    } else if (changes.flushFit !== undefined) {
+      desc = changes.flushFit ? 'Flush Fit: Açık' : 'Flush Fit: Kapalı';
+      subType = 'pin_flush';
+      isContinuous = false;
     }
 
-    pushHistory(desc, 'PIN_CONFIG', { pinConfig: nextPin });
+    pushHistory(desc, 'PIN_CONFIG', { pinConfig: nextPin }, subType, isContinuous);
   };
 
   const resetCamera = () => {
@@ -908,32 +1375,33 @@ export function App() {
    */
   const handleExportPartA = () => {
     if (splitResult) {
-      downloadMeshSTL(splitResult.partA.geometry, `${modelName}_Part_1_Pin.stl`, 'binary');
-      setStatusMessage(`Part 1 STL (${modelName}_Part_1_Pin.stl) indirildi.`);
+      downloadMeshSTL(splitResult.partA.geometry, `${modelName}_Part_1_Pin.stl`, exportConfig.format, exportConfig);
+      setStatusMessage(`Part 1 STL (${modelName}_Part_1_Pin.stl) [${exportConfig.format.toUpperCase()} • %${Math.round(exportConfig.density * 100)}] indirildi.`);
     }
   };
 
   const handleExportPartB = () => {
     if (splitResult) {
-      downloadMeshSTL(splitResult.partB.geometry, `${modelName}_Part_2_Socket.stl`, 'binary');
-      setStatusMessage(`Part 2 STL (${modelName}_Part_2_Socket.stl) indirildi.`);
+      downloadMeshSTL(splitResult.partB.geometry, `${modelName}_Part_2_Socket.stl`, exportConfig.format, exportConfig);
+      setStatusMessage(`Part 2 STL (${modelName}_Part_2_Socket.stl) [${exportConfig.format.toUpperCase()} • %${Math.round(exportConfig.density * 100)}] indirildi.`);
     }
   };
 
   const handleExportCombined = () => {
     if (splitResult) {
-      downloadCombinedSTL(splitResult.partA, splitResult.partB, modelName, 'binary');
-      setStatusMessage(`Birleştirilmiş Kesilmiş STL (${modelName}_Sliced_Combined.stl) indirildi.`);
+      downloadCombinedSTL(splitResult.partA, splitResult.partB, modelName, exportConfig.format, exportConfig);
+      setStatusMessage(`Birleştirilmiş Kesilmiş STL (${modelName}_Sliced_Combined.stl) [${exportConfig.format.toUpperCase()}] indirildi.`);
     }
   };
 
   const handleExportZip = async () => {
     if (splitResult) {
       await downloadAllPartsZip(splitResult.partA, splitResult.partB, modelName, {
+        ...exportConfig,
         dowelPinGeometry: splitResult.dowelPinGeometry,
         dowelSpecs: splitResult.dowelSpecs
       });
-      setStatusMessage('Tüm parçalar ZIP paketi olarak indirildi (3D baskıya hazır).');
+      setStatusMessage(`Tüm parçalar ZIP paketi olarak indirildi [${exportConfig.format.toUpperCase()} • %${Math.round(exportConfig.density * 100)}].`);
     }
   };
 
@@ -943,21 +1411,22 @@ export function App() {
       downloadMeshSTL(
         splitResult.dowelPinGeometry,
         `${modelName}_Alignment_Dowel_Pin_D${specs.diameter}xL${specs.length}.stl`,
-        'binary'
+        exportConfig.format,
+        exportConfig
       );
-      setStatusMessage(`Hizalama Dübel Pimi STL indirildi (Ø${specs.diameter}mm x ${specs.length}mm).`);
+      setStatusMessage(`Hizalama Dübel Pimi STL indirildi (Ø${specs.diameter}mm x ${specs.length}mm) [${exportConfig.format.toUpperCase()}].`);
     }
   };
 
   const handleExportFullModel = () => {
     if (model) {
-      downloadMeshSTL(model.geometry, `${modelName}.stl`, 'binary');
-      setStatusMessage(`${modelName}.stl dosyası indirildi.`);
+      downloadMeshSTL(model.geometry, `${modelName}.stl`, exportConfig.format, exportConfig);
+      setStatusMessage(`${modelName}.stl dosyası indirildi [${exportConfig.format.toUpperCase()} • %${Math.round(exportConfig.density * 100)}].`);
     }
   };
 
-  const statsA = splitResult ? calculateGeometryStats(splitResult.partA?.geometry) : null;
-  const statsB = splitResult ? calculateGeometryStats(splitResult.partB?.geometry) : null;
+  const statsA = splitResult ? calculateGeometryStats(splitResult.partA?.geometry, exportConfig.density) : null;
+  const statsB = splitResult ? calculateGeometryStats(splitResult.partB?.geometry, exportConfig.density) : null;
 
   return (
     <div className="flex flex-col md:flex-row h-screen w-screen bg-gray-950 text-white font-sans overflow-hidden select-none">
@@ -998,6 +1467,8 @@ export function App() {
         onExportFullModel={handleExportFullModel}
         onExportDowelPin={handleExportDowelPin}
         onOpenExportModal={() => setIsExportModalOpen(true)}
+        exportConfig={exportConfig}
+        onChangeExportConfig={setExportConfig}
         onFileUpload={handleFileUpload}
         onSelectPreset={loadPresetModel}
         isWireframe={isWireframe}
@@ -1032,11 +1503,34 @@ export function App() {
         canRedo={canRedo}
         onUndo={handleUndo}
         onRedo={handleRedo}
+        undoTooltip={undoTooltip}
+        redoTooltip={redoTooltip}
         historyCount={history.length}
         currentHistoryIndex={historyIndex}
         onOpenHistory={() => setIsHistoryOpen(true)}
         onOpenMeshList={() => setIsMeshListOpen((prev) => !prev)}
         meshCount={splitResult ? (splitResult.dowelPinGeometry ? 3 : 2) : (model ? 1 : 0)}
+        // Overhang Heat-map props
+        heatmapConfig={heatmapConfig}
+        onChangeHeatmapConfig={handleChangeHeatmapConfig}
+        onApplyModelRotationAsPrintDir={handleApplyModelRotationAsPrintDir}
+        overhangStats={overhangStats}
+        currentTab={activeControlsTab}
+        onSelectTab={setActiveControlsTab}
+        // Batch Processing props
+        batchQueue={batchQueue}
+        onOpenBatchModal={() => setIsBatchModalOpen(true)}
+        onUpdateQueue={setBatchQueue}
+        isBatchProcessing={isBatchProcessing}
+        currentBatchProcessingId={currentBatchProcessingId}
+        onStartBatchProcessing={handleStartBatchProcessing}
+        onCancelBatchProcessing={handleCancelBatchProcessing}
+        onDownloadAllBatchZip={handleDownloadAllBatchZip}
+        isExportingBatchAll={isExportingBatchAll}
+        onLoadBatchItemInViewport={handleLoadBatchItemInViewport}
+        onAddBatchFiles={handleAddBatchFiles}
+        onAddAllBatchPresets={handleAddAllBatchPresets}
+        onClearBatchQueue={handleClearBatchQueue}
       />
 
       {/* Right 3D Viewport Scene */}
@@ -1077,7 +1571,7 @@ export function App() {
                     ? 'text-blue-300 hover:bg-blue-500/20 active:scale-95'
                     : 'text-gray-600 cursor-not-allowed opacity-50'
                 }`}
-                title="Geri Al (Ctrl+Z)"
+                title={undoTooltip}
               >
                 <Undo2 className="w-3.5 h-3.5" />
               </button>
@@ -1090,7 +1584,7 @@ export function App() {
                     ? 'text-emerald-300 hover:bg-emerald-500/20 active:scale-95'
                     : 'text-gray-600 cursor-not-allowed opacity-50'
                 }`}
-                title="Yinele (Ctrl+Y)"
+                title={redoTooltip}
               >
                 <Redo2 className="w-3.5 h-3.5" />
               </button>
@@ -1106,6 +1600,25 @@ export function App() {
                 <span>{historyIndex + 1}/{history.length}</span>
               </button>
             </div>
+
+            {/* Quick Batch Queue Button */}
+            <button
+              onClick={() => setIsBatchModalOpen(true)}
+              className={`text-xs font-semibold px-3 py-1.5 rounded-full shadow-2xl flex items-center gap-1.5 border transition ${
+                batchQueue.length > 0
+                  ? 'bg-emerald-600 hover:bg-emerald-500 text-white border-emerald-400/40 hover:scale-105'
+                  : 'bg-gray-900/90 hover:bg-gray-800 text-emerald-300 border-gray-700/80'
+              }`}
+              title="Toplu İşleme Kuyruğu (Batch Queue)"
+            >
+              <Layers className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Toplu Kuyruk</span>
+              {batchQueue.length > 0 && (
+                <span className="bg-emerald-950 text-emerald-300 border border-emerald-500/40 text-[10px] font-mono px-1.5 py-0.2 rounded-full font-bold">
+                  {batchQueue.length}
+                </span>
+              )}
+            </button>
 
             {/* Quick Export Button when Split Result is active */}
             {splitResult && (
@@ -1271,6 +1784,20 @@ export function App() {
           isMeshListOpen={isMeshListOpen}
           onToggleMeshList={() => setIsMeshListOpen((prev) => !prev)}
           meshCount={splitResult ? (splitResult.dowelPinGeometry ? 3 : 2) : (model ? 1 : 0)}
+          // Overhang Heat-map props
+          isHeatmapActive={heatmapConfig.enabled}
+          onToggleHeatmap={handleToggleHeatmap}
+          heatmapConfig={heatmapConfig}
+          onChangeHeatmapConfig={handleChangeHeatmapConfig}
+          overhangStats={overhangStats}
+          onOpenOverhangTab={() => setActiveControlsTab('overhang')}
+          // Batch processing props
+          onMultipleFilesDrop={(files) => {
+            handleAddBatchFiles(files);
+            setIsBatchModalOpen(true);
+          }}
+          onOpenBatchModal={() => setIsBatchModalOpen(true)}
+          batchQueueCount={batchQueue.length}
         />
 
         {/* 3D Meshes & Outliner Side Panel */}
@@ -1304,6 +1831,20 @@ export function App() {
         modelName={modelName}
         splitResult={splitResult}
         originalModel={model}
+        exportConfig={exportConfig}
+        onChangeExportConfig={setExportConfig}
+        onNotify={(msg) => setStatusMessage(msg)}
+      />
+
+      {/* Batch Processing Queue Modal */}
+      <BatchProcessingModal
+        isOpen={isBatchModalOpen}
+        onClose={() => setIsBatchModalOpen(false)}
+        queue={batchQueue}
+        onUpdateQueue={setBatchQueue}
+        activeClippingConfig={clippingConfig}
+        activePinConfig={pinConfig}
+        onLoadItemInViewport={handleLoadBatchItemInViewport}
         onNotify={(msg) => setStatusMessage(msg)}
       />
 

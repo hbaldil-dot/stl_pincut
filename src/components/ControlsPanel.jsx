@@ -33,11 +33,15 @@ import {
   Target,
   CircleDot,
   Settings2,
-  Crosshair
+  Crosshair,
+  Flame
 } from 'lucide-react';
 import { SAMPLE_PRESETS } from '../utils/sampleModels';
 import { MATERIAL_THEMES } from '../utils/stlLoaderHelper';
 import { calculateGeometryStats } from '../utils/stlExporter';
+import { OverhangSupportTab } from './OverhangSupportTab';
+import { ExportConfigPanel } from './ExportConfigPanel';
+import { BatchQueueTab } from './BatchQueueTab';
 
 export function ControlsPanel({
   modelName,
@@ -72,6 +76,9 @@ export function ControlsPanel({
   onExportFullModel,
   onExportDowelPin,
   onOpenExportModal,
+  // Export configuration options
+  exportConfig,
+  onChangeExportConfig,
   // Viewport & theme props
   onFileUpload,
   onSelectPreset,
@@ -108,14 +115,39 @@ export function ControlsPanel({
   canRedo = false,
   onUndo,
   onRedo,
+  undoTooltip = null,
+  redoTooltip = null,
   historyCount = 1,
   currentHistoryIndex = 0,
   onOpenHistory,
   onOpenMeshList,
-  meshCount = 1
+  meshCount = 1,
+  // Overhang Heat-map & Print Orientation props
+  heatmapConfig,
+  onChangeHeatmapConfig,
+  onApplyModelRotationAsPrintDir,
+  overhangStats,
+  currentTab,
+  onSelectTab,
+  // Batch Processing Queue props
+  batchQueue = [],
+  onOpenBatchModal,
+  onUpdateBatchQueue,
+  isBatchProcessing = false,
+  currentBatchProcessingId = null,
+  onStartBatchProcessing,
+  onCancelBatchProcessing,
+  onDownloadAllBatchZip,
+  isExportingBatchAll = false,
+  onLoadBatchItemInViewport,
+  onAddBatchFiles,
+  onAddAllBatchPresets,
+  onClearBatchQueue
 }) {
   const [isPresetsOpen, setIsPresetsOpen] = useState(false);
-  const [activeTab, setActiveTab] = useState('slice'); // 'slice' | 'measure' | 'material' | 'display' | 'export'
+  const [internalActiveTab, setInternalActiveTab] = useState('slice'); // 'slice' | 'rotate' | 'overhang' | 'measure' | 'material' | 'export'
+  const activeTab = currentTab || internalActiveTab;
+  const setActiveTab = onSelectTab || setInternalActiveTab;
   const [isCopied, setIsCopied] = useState(false);
 
   // Dynamic range for offset slider based on model bounding radius
@@ -132,6 +164,11 @@ export function ControlsPanel({
   const currentDepth = pinConfig?.depth || pinConfig?.height || 10;
   const currentClearance = typeof pinConfig?.clearance === 'number' ? pinConfig.clearance : 0.2;
   const currentMode = pinConfig?.mode || 'pin_and_hole';
+  const isSnappedToNormal = pinConfig?.snapToNormal !== false;
+  const isSnappedToCenter = pinConfig?.snapToCenter !== false;
+  const isFlushFit = pinConfig?.flushFit !== false;
+  const offsetU = pinConfig?.offsetU || 0;
+  const offsetV = pinConfig?.offsetV || 0;
 
   // Calculated distance between Point A and Point B
   const measuredDistance = useMemo(() => {
@@ -182,7 +219,7 @@ export function ControlsPanel({
                 ? 'bg-gray-800 hover:bg-gray-700 text-blue-300 border-gray-700 hover:border-blue-500/50 shadow-sm'
                 : 'bg-gray-900/40 text-gray-600 border-gray-850 cursor-not-allowed'
             }`}
-            title="Geri Al (Ctrl+Z)"
+            title={undoTooltip || "Geri Al (Ctrl+Z)"}
           >
             <Undo2 className="w-4 h-4" />
           </button>
@@ -196,7 +233,7 @@ export function ControlsPanel({
                 ? 'bg-gray-800 hover:bg-gray-700 text-emerald-300 border-gray-700 hover:border-emerald-500/50 shadow-sm'
                 : 'bg-gray-900/40 text-gray-600 border-gray-850 cursor-not-allowed'
             }`}
-            title="Yinele (Ctrl+Y / Ctrl+Shift+Z)"
+            title={redoTooltip || "Yinele (Ctrl+Y / Ctrl+Shift+Z)"}
           >
             <Redo2 className="w-4 h-4" />
           </button>
@@ -235,6 +272,20 @@ export function ControlsPanel({
             title="Model İnceleyici ve Katı Analizi"
           >
             <Info className="w-4 h-4" />
+          </button>
+
+          {/* Quick Batch Queue Button in Header */}
+          <button
+            onClick={onOpenBatchModal}
+            className="p-1.5 bg-gray-800 hover:bg-gray-700 text-emerald-300 rounded-lg border border-gray-700 hover:border-emerald-500/50 transition relative"
+            title="Toplu İşleme Kuyruğu (Batch Queue)"
+          >
+            <Layers className="w-4 h-4" />
+            {batchQueue.length > 0 && (
+              <span className="absolute -top-1 -right-1 bg-emerald-500 text-white text-[9px] font-mono px-1 rounded-full border border-gray-900 leading-tight">
+                {batchQueue.length}
+              </span>
+            )}
           </button>
 
           <button
@@ -278,6 +329,19 @@ export function ControlsPanel({
         </button>
 
         <button
+          onClick={() => setActiveTab('overhang')}
+          className={`py-2 px-3 text-xs font-semibold rounded-t-xl transition flex items-center gap-1.5 shrink-0 ${
+            activeTab === 'overhang'
+              ? 'bg-gray-850 text-red-400 border-t border-l border-r border-gray-700 border-b-2 border-b-transparent'
+              : 'text-gray-400 hover:text-gray-200'
+          }`}
+        >
+          <Flame className="w-3.5 h-3.5 text-red-400" />
+          <span>Destek / Overhang</span>
+          {heatmapConfig?.enabled && <span className="w-1.5 h-1.5 rounded-full bg-red-400 animate-ping" />}
+        </button>
+
+        <button
           onClick={() => setActiveTab('measure')}
           className={`py-2 px-3 text-xs font-semibold rounded-t-xl transition flex items-center gap-1.5 shrink-0 ${
             activeTab === 'measure'
@@ -300,6 +364,23 @@ export function ControlsPanel({
         >
           <Palette className="w-3.5 h-3.5" />
           <span>Görünüm</span>
+        </button>
+
+        <button
+          onClick={() => setActiveTab('batch')}
+          className={`py-2 px-3 text-xs font-semibold rounded-t-xl transition flex items-center gap-1.5 shrink-0 ${
+            activeTab === 'batch'
+              ? 'bg-gray-850 text-emerald-400 border-t border-l border-r border-gray-700 border-b-2 border-b-transparent'
+              : 'text-gray-400 hover:text-gray-200'
+          }`}
+        >
+          <Layers className="w-3.5 h-3.5" />
+          <span>Toplu Kuyruk</span>
+          {batchQueue.length > 0 && (
+            <span className="text-[10px] font-mono bg-emerald-500/20 text-emerald-300 px-1.5 py-0.2 rounded-full border border-emerald-500/30">
+              {batchQueue.length}
+            </span>
+          )}
         </button>
 
         {splitResult && (
@@ -364,16 +445,32 @@ export function ControlsPanel({
                 )}
               </div>
 
-              {/* Upload custom STL */}
-              <label className="p-2 bg-gray-800 hover:bg-gray-700 text-gray-200 rounded-xl border border-gray-700 cursor-pointer transition flex items-center justify-center shrink-0">
+              {/* Upload custom STL (supports multi-select for batch processing) */}
+              <label
+                className="p-2 bg-gray-800 hover:bg-gray-700 text-gray-200 rounded-xl border border-gray-700 cursor-pointer transition flex items-center justify-center shrink-0"
+                title="STL Modeli Yükle (Birden çok seçilirse Toplu İşleme Kuyruğuna eklenir)"
+              >
                 <Upload className="w-4 h-4 text-emerald-400" />
                 <input
                   type="file"
+                  multiple
                   accept=".stl"
                   onChange={onFileUpload}
                   className="hidden"
                 />
               </label>
+            </div>
+
+            {/* Quick Banner to Launch Batch Queue */}
+            <div className="flex items-center justify-between p-2 bg-emerald-950/25 border border-emerald-800/40 rounded-xl text-[11px]">
+              <span className="text-gray-300">Birden çok modeli sırayla kes:</span>
+              <button
+                onClick={() => setActiveTab('batch')}
+                className="text-emerald-400 hover:text-emerald-300 font-semibold flex items-center gap-1"
+              >
+                <span>Toplu Kuyruk</span>
+                <span className="text-emerald-500">&rarr;</span>
+              </button>
             </div>
           </div>
 
@@ -458,7 +555,7 @@ export function ControlsPanel({
                 </label>
                 <div className="grid grid-cols-4 gap-1">
                   <button
-                    onClick={() => onClippingConfigChange({ axis: 'x', rotX: 0, rotY: 0, rotZ: 0 })}
+                    onClick={() => onClippingConfigChange({ axis: 'x', rotX: 0, rotY: 0, rotZ: 0 }, false)}
                     className={`py-1.5 px-1 rounded-lg text-xs font-semibold border transition text-center ${
                       clippingConfig.axis === 'x'
                         ? 'bg-red-600/30 border-red-500 text-red-300'
@@ -468,7 +565,7 @@ export function ControlsPanel({
                     X (Sağ/Sol)
                   </button>
                   <button
-                    onClick={() => onClippingConfigChange({ axis: 'y', rotX: 0, rotY: 0, rotZ: 0 })}
+                    onClick={() => onClippingConfigChange({ axis: 'y', rotX: 0, rotY: 0, rotZ: 0 }, false)}
                     className={`py-1.5 px-1 rounded-lg text-xs font-semibold border transition text-center ${
                       clippingConfig.axis === 'y'
                         ? 'bg-emerald-600/30 border-emerald-500 text-emerald-300'
@@ -478,7 +575,7 @@ export function ControlsPanel({
                     Y (Dikey)
                   </button>
                   <button
-                    onClick={() => onClippingConfigChange({ axis: 'z', rotX: 0, rotY: 0, rotZ: 0 })}
+                    onClick={() => onClippingConfigChange({ axis: 'z', rotX: 0, rotY: 0, rotZ: 0 }, false)}
                     className={`py-1.5 px-1 rounded-lg text-xs font-semibold border transition text-center ${
                       clippingConfig.axis === 'z'
                         ? 'bg-blue-600/30 border-blue-500 text-blue-300'
@@ -488,7 +585,7 @@ export function ControlsPanel({
                     Z (Ön/Arka)
                   </button>
                   <button
-                    onClick={() => onClippingConfigChange({ axis: 'custom' })}
+                    onClick={() => onClippingConfigChange({ axis: 'custom' }, false)}
                     className={`py-1.5 px-1 rounded-lg text-xs font-semibold border transition text-center ${
                       clippingConfig.axis === 'custom'
                         ? 'bg-purple-600/30 border-purple-500 text-purple-300'
@@ -500,7 +597,76 @@ export function ControlsPanel({
                 </div>
               </div>
 
-              {/* Offset Slider */}
+              {/* Custom Angle Sliders (when axis === 'custom') */}
+              {clippingConfig.axis === 'custom' && (
+                <div className="bg-gray-900/60 border border-purple-900/40 rounded-xl p-2.5 space-y-2">
+                  <div className="flex items-center justify-between text-[11px] font-medium text-purple-300">
+                    <span className="flex items-center gap-1">
+                      <Compass className="w-3.5 h-3.5 text-purple-400" />
+                      <span>Serbest Düzlem Açıları (XYZ)</span>
+                    </span>
+                    <button
+                      onClick={() => onClippingConfigChange({ rotX: 0, rotY: 0, rotZ: 0 }, false)}
+                      className="text-[10px] text-gray-400 hover:text-white px-1.5 py-0.5 bg-gray-800 rounded border border-gray-700 transition"
+                    >
+                      Sıfırla (0°)
+                    </button>
+                  </div>
+
+                  {/* Pitch X */}
+                  <div className="space-y-1">
+                    <div className="flex justify-between text-[10px] text-gray-400">
+                      <span>X Eğimi (Pitch)</span>
+                      <span className="font-mono text-purple-300">{Math.round(clippingConfig.rotX || 0)}°</span>
+                    </div>
+                    <input
+                      type="range"
+                      min="-180"
+                      max="180"
+                      step="1"
+                      value={clippingConfig.rotX || 0}
+                      onChange={(e) => onClippingConfigChange({ rotX: parseFloat(e.target.value) }, true)}
+                      className="w-full accent-purple-500 cursor-pointer h-1.5 bg-gray-800 rounded-lg appearance-none"
+                    />
+                  </div>
+
+                  {/* Yaw Y */}
+                  <div className="space-y-1">
+                    <div className="flex justify-between text-[10px] text-gray-400">
+                      <span>Y Eğimi (Yaw)</span>
+                      <span className="font-mono text-purple-300">{Math.round(clippingConfig.rotY || 0)}°</span>
+                    </div>
+                    <input
+                      type="range"
+                      min="-180"
+                      max="180"
+                      step="1"
+                      value={clippingConfig.rotY || 0}
+                      onChange={(e) => onClippingConfigChange({ rotY: parseFloat(e.target.value) }, true)}
+                      className="w-full accent-purple-500 cursor-pointer h-1.5 bg-gray-800 rounded-lg appearance-none"
+                    />
+                  </div>
+
+                  {/* Roll Z */}
+                  <div className="space-y-1">
+                    <div className="flex justify-between text-[10px] text-gray-400">
+                      <span>Z Eğimi (Roll)</span>
+                      <span className="font-mono text-purple-300">{Math.round(clippingConfig.rotZ || 0)}°</span>
+                    </div>
+                    <input
+                      type="range"
+                      min="-180"
+                      max="180"
+                      step="1"
+                      value={clippingConfig.rotZ || 0}
+                      onChange={(e) => onClippingConfigChange({ rotZ: parseFloat(e.target.value) }, true)}
+                      className="w-full accent-purple-500 cursor-pointer h-1.5 bg-gray-800 rounded-lg appearance-none"
+                    />
+                  </div>
+                </div>
+              )}
+
+              {/* Offset Slider & Quick Presets */}
               <div>
                 <div className="flex justify-between text-[11px] text-gray-400 mb-1 font-medium">
                   <span>Düzlem Konumu (Offset)</span>
@@ -514,15 +680,87 @@ export function ControlsPanel({
                   max={maxOffset}
                   step="0.5"
                   value={clippingConfig.offset}
-                  onChange={(e) => onClippingConfigChange({ offset: parseFloat(e.target.value) })}
+                  onChange={(e) => onClippingConfigChange({ offset: parseFloat(e.target.value) }, true)}
                   className="w-full accent-blue-500 cursor-pointer h-1.5 bg-gray-800 rounded-lg appearance-none"
                 />
+
+                {/* Quick Offset Presets */}
+                <div className="grid grid-cols-5 gap-1 mt-1.5">
+                  <button
+                    onClick={() => onClippingConfigChange({ offset: minOffset }, false)}
+                    className="py-1 px-1 rounded text-[10px] font-mono text-gray-400 bg-gray-800/80 hover:bg-gray-750 hover:text-white border border-gray-750 transition text-center"
+                    title={`En Alt Sınır (${minOffset.toFixed(1)} mm)`}
+                  >
+                    Min
+                  </button>
+                  <button
+                    onClick={() => onClippingConfigChange({ offset: Math.max(minOffset, clippingConfig.offset - 10) }, false)}
+                    className="py-1 px-1 rounded text-[10px] font-mono text-gray-400 bg-gray-800/80 hover:bg-gray-750 hover:text-white border border-gray-750 transition text-center"
+                    title="10 mm Aşağı"
+                  >
+                    -10
+                  </button>
+                  <button
+                    onClick={() => onClippingConfigChange({ offset: 0 }, false)}
+                    className={`py-1 px-1 rounded text-[10px] font-mono font-bold border transition text-center ${
+                      Math.abs(clippingConfig.offset) < 0.1
+                        ? 'bg-blue-600/40 text-blue-300 border-blue-500'
+                        : 'text-gray-300 bg-gray-800/80 hover:bg-gray-750 border-gray-750'
+                    }`}
+                    title="Merkez Konum (0 mm)"
+                  >
+                    0 (Merkez)
+                  </button>
+                  <button
+                    onClick={() => onClippingConfigChange({ offset: Math.min(maxOffset, clippingConfig.offset + 10) }, false)}
+                    className="py-1 px-1 rounded text-[10px] font-mono text-gray-400 bg-gray-800/80 hover:bg-gray-750 hover:text-white border border-gray-750 transition text-center"
+                    title="10 mm Yukarı"
+                  >
+                    +10
+                  </button>
+                  <button
+                    onClick={() => onClippingConfigChange({ offset: maxOffset }, false)}
+                    className="py-1 px-1 rounded text-[10px] font-mono text-gray-400 bg-gray-800/80 hover:bg-gray-750 hover:text-white border border-gray-750 transition text-center"
+                    title={`En Üst Sınır (${maxOffset.toFixed(1)} mm)`}
+                  >
+                    Max
+                  </button>
+                </div>
+              </div>
+
+              {/* Visibility & Behavior Toggles */}
+              <div className="grid grid-cols-2 gap-2 pt-1">
+                <button
+                  onClick={() => onClippingConfigChange({ showPlaneHelper: clippingConfig.showPlaneHelper === false ? true : false }, false)}
+                  className={`py-1.5 px-2 rounded-lg text-[11px] font-medium border transition flex items-center justify-center gap-1.5 ${
+                    clippingConfig.showPlaneHelper !== false
+                      ? 'bg-blue-950/40 border-blue-500/60 text-blue-300'
+                      : 'bg-gray-800/50 border-gray-700 text-gray-400 hover:bg-gray-800'
+                  }`}
+                  title="Kesit düzlemi kılavuz sacını ekranda göster / gizle"
+                >
+                  <Layers className="w-3.5 h-3.5" />
+                  <span>Kılavuz Düzlemi</span>
+                </button>
+
+                <button
+                  onClick={() => onClippingConfigChange({ addPinOnSlice: clippingConfig.addPinOnSlice === false ? true : false }, false)}
+                  className={`py-1.5 px-2 rounded-lg text-[11px] font-medium border transition flex items-center justify-center gap-1.5 ${
+                    clippingConfig.addPinOnSlice !== false
+                      ? 'bg-orange-950/40 border-orange-500/60 text-orange-300'
+                      : 'bg-gray-800/50 border-gray-700 text-gray-400 hover:bg-gray-800'
+                  }`}
+                  title="Kesim anında seçili pim ve delik geometriyi otomatik uygula"
+                >
+                  <Sparkles className="w-3.5 h-3.5" />
+                  <span>Pimli Kesim</span>
+                </button>
               </div>
 
               {/* Action Buttons: Negate & Slice */}
               <div className="flex items-center gap-2 pt-1">
                 <button
-                  onClick={() => onClippingConfigChange({ negate: !clippingConfig.negate })}
+                  onClick={() => onClippingConfigChange({ negate: !clippingConfig.negate }, false)}
                   className="flex-1 py-1.5 px-2 bg-gray-800 hover:bg-gray-750 text-gray-300 rounded-lg text-xs font-medium border border-gray-700 transition flex items-center justify-center gap-1"
                 >
                   <ArrowUpDown className="w-3.5 h-3.5 text-gray-400" />
@@ -692,7 +930,7 @@ export function ControlsPanel({
                 value={currentDiameter}
                 onChange={(e) => {
                   const val = parseFloat(e.target.value);
-                  onPinConfigChange({ diameter: val, size: val });
+                  onPinConfigChange({ diameter: val, size: val }, true);
                 }}
                 className="w-full accent-orange-500 cursor-pointer h-1.5 bg-gray-800 rounded-lg appearance-none"
               />
@@ -819,6 +1057,172 @@ export function ControlsPanel({
                 </div>
               </div>
             )}
+
+            {/* Surface Normal Snapping & Flush Fitting Control Section */}
+            <div className="pt-2 border-t border-gray-800/80 flex flex-col gap-2.5">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-1.5 text-[11px] text-gray-200 font-semibold">
+                  <Crosshair className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>Yüzey Normaline & Merkeze Kitleme</span>
+                </div>
+                <span
+                  className={`text-[10px] font-mono px-2 py-0.5 rounded-full border flex items-center gap-1 ${
+                    isSnappedToNormal && isSnappedToCenter
+                      ? 'text-emerald-300 bg-emerald-950/70 border-emerald-700/60 font-bold'
+                      : 'text-amber-300 bg-amber-950/60 border-amber-800/50'
+                  }`}
+                >
+                  <Target className="w-3 h-3" />
+                  {isSnappedToNormal && isSnappedToCenter ? '90° Flush Kilitli' : 'Özel Konum'}
+                </span>
+              </div>
+
+              {/* Snapping Mode Toggle Grid */}
+              <div className="grid grid-cols-2 gap-2">
+                {/* Snap to Normal Toggle */}
+                <button
+                  onClick={() => onPinConfigChange({ snapToNormal: !isSnappedToNormal })}
+                  className={`p-2 rounded-xl text-left border transition flex flex-col justify-between ${
+                    isSnappedToNormal
+                      ? 'bg-emerald-950/40 border-emerald-500/70 text-emerald-300 shadow-sm shadow-emerald-950/50'
+                      : 'bg-gray-850/60 border-gray-800 text-gray-400 hover:bg-gray-800'
+                  }`}
+                  title="Pim eksenini kesit düzlemine 90.0° tam dik kilitler. Eksenel eğikliği önler."
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] font-bold">Yüzey Normali</span>
+                    <span className={`w-2 h-2 rounded-full ${isSnappedToNormal ? 'bg-emerald-400 animate-pulse' : 'bg-gray-600'}`} />
+                  </div>
+                  <div className="text-[9px] text-gray-400 mt-1">
+                    {isSnappedToNormal ? '90.0° Dik (Kilitli)' : 'Serbest Açı'}
+                  </div>
+                </button>
+
+                {/* Snap to Center Toggle */}
+                <button
+                  onClick={() => {
+                    const nextSnapCenter = !isSnappedToCenter;
+                    onPinConfigChange({
+                      snapToCenter: nextSnapCenter,
+                      ...(nextSnapCenter ? { offsetU: 0, offsetV: 0 } : {})
+                    });
+                  }}
+                  className={`p-2 rounded-xl text-left border transition flex flex-col justify-between ${
+                    isSnappedToCenter
+                      ? 'bg-teal-950/40 border-teal-500/70 text-teal-300 shadow-sm shadow-teal-950/50'
+                      : 'bg-gray-850/60 border-gray-800 text-gray-400 hover:bg-gray-800'
+                  }`}
+                  title="Pimi kesit geometrisinin ağırlık merkezine kilitler."
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] font-bold">Kesit Merkezi</span>
+                    <span className={`w-2 h-2 rounded-full ${isSnappedToCenter ? 'bg-teal-400' : 'bg-gray-600'}`} />
+                  </div>
+                  <div className="text-[9px] text-gray-400 mt-1">
+                    {isSnappedToCenter ? 'Merkezde (0, 0)' : 'Özel Ofset'}
+                  </div>
+                </button>
+              </div>
+
+              {/* Flush Fit Diagnostics Card */}
+              <div className="bg-gray-900/80 border border-gray-800 rounded-xl p-2.5 space-y-1.5 text-[10px]">
+                <div className="flex items-center justify-between text-gray-300">
+                  <span className="flex items-center gap-1 text-gray-400">
+                    <Compass className="w-3 h-3 text-cyan-400" /> Normal Açısı:
+                  </span>
+                  <span className="font-mono font-bold text-emerald-400">90.0° (Tam Dik)</span>
+                </div>
+                <div className="flex items-center justify-between text-gray-300">
+                  <span className="flex items-center gap-1 text-gray-400">
+                    <CheckCircle2 className="w-3 h-3 text-emerald-400" /> Mating Gap (Boşluk):
+                  </span>
+                  <span className="font-mono font-bold text-emerald-400">0.00 mm (Tam Flush)</span>
+                </div>
+                <div className="flex items-center justify-between text-gray-300">
+                  <span className="flex items-center gap-1 text-gray-400">
+                    <Layers className="w-3 h-3 text-purple-400" /> Dip Emniyet Payı:
+                  </span>
+                  <span className="font-mono font-bold text-purple-300">+0.50 mm (Dip Sıkışması Önleyici)</span>
+                </div>
+              </div>
+
+              {/* Reset to Center & Surface Normal Button */}
+              {(!isSnappedToNormal || !isSnappedToCenter || offsetU !== 0 || offsetV !== 0) && (
+                <button
+                  onClick={() => {
+                    onPinConfigChange({
+                      snapToNormal: true,
+                      snapToCenter: true,
+                      offsetU: 0,
+                      offsetV: 0
+                    });
+                  }}
+                  className="w-full py-1.5 px-3 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-bold transition flex items-center justify-center gap-1.5 shadow-md shadow-emerald-950/40"
+                >
+                  <Target className="w-3.5 h-3.5" />
+                  <span>Merkeze ve Yüzey Normaline Kitle (0, 0)</span>
+                </button>
+              )}
+
+              {/* In-Plane Tangent Offset Sliders (when not snapped to center) */}
+              {!isSnappedToCenter && (
+                <div className="pt-2 border-t border-gray-800/60 space-y-2 bg-gray-900/40 p-2.5 rounded-xl border border-gray-800/80">
+                  <div className="flex items-center justify-between text-[11px] text-gray-300 font-medium">
+                    <span className="text-gray-400">Düzlem Üzerinde Konum (U, V):</span>
+                    <span className="font-mono text-cyan-400 text-[10px]">
+                      U: {offsetU > 0 ? `+${offsetU.toFixed(1)}` : offsetU.toFixed(1)} | V: {offsetV > 0 ? `+${offsetV.toFixed(1)}` : offsetV.toFixed(1)} mm
+                    </span>
+                  </div>
+
+                  {/* U Offset Slider */}
+                  <div className="space-y-1">
+                    <div className="flex justify-between text-[10px] text-gray-400">
+                      <span>U-Ekseni (Tanjant X)</span>
+                      <span className="font-mono">{offsetU.toFixed(1)} mm</span>
+                    </div>
+                    <input
+                      type="range"
+                      min="-25"
+                      max="25"
+                      step="0.5"
+                      value={offsetU}
+                      onChange={(e) => {
+                        let val = parseFloat(e.target.value);
+                        if (Math.abs(val) < 2.5) val = 0; // magnetic snapping near center
+                        onPinConfigChange({ offsetU: val });
+                      }}
+                      className="w-full accent-cyan-500 cursor-pointer h-1.5 bg-gray-800 rounded-lg appearance-none"
+                    />
+                  </div>
+
+                  {/* V Offset Slider */}
+                  <div className="space-y-1">
+                    <div className="flex justify-between text-[10px] text-gray-400">
+                      <span>V-Ekseni (Tanjant Y)</span>
+                      <span className="font-mono">{offsetV.toFixed(1)} mm</span>
+                    </div>
+                    <input
+                      type="range"
+                      min="-25"
+                      max="25"
+                      step="0.5"
+                      value={offsetV}
+                      onChange={(e) => {
+                        let val = parseFloat(e.target.value);
+                        if (Math.abs(val) < 2.5) val = 0; // magnetic snapping near center
+                        onPinConfigChange({ offsetV: val });
+                      }}
+                      className="w-full accent-cyan-500 cursor-pointer h-1.5 bg-gray-800 rounded-lg appearance-none"
+                    />
+                  </div>
+
+                  <div className="text-[9px] text-gray-500 flex items-center gap-1">
+                    <Sparkles className="w-2.5 h-2.5 text-amber-400" />
+                    <span>Manyetik kitleme: ±2.5mm yaklaşınca merkeze yapışır.</span>
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
 
           {/* 3. Sliced & Exploded View Active Panel */}
@@ -1385,6 +1789,19 @@ export function ControlsPanel({
         </div>
       )}
 
+      {/* Tab: Overhang & Support Heat-Map */}
+      {activeTab === 'overhang' && (
+        <OverhangSupportTab
+          model={model}
+          splitResult={splitResult}
+          modelRotation={modelRotation}
+          heatmapConfig={heatmapConfig}
+          onChangeHeatmapConfig={onChangeHeatmapConfig}
+          onApplyModelRotationAsPrintDir={onApplyModelRotationAsPrintDir}
+          overhangStats={overhangStats}
+        />
+      )}
+
       {/* Tab 4: Export Sliced STL (Available when splitResult is active) */}
       {activeTab === 'export' && splitResult && (
         <div className="p-4 flex flex-col gap-3.5">
@@ -1396,10 +1813,22 @@ export function ControlsPanel({
               onClick={onOpenExportModal}
               className="text-[11px] text-cyan-400 hover:text-cyan-300 flex items-center gap-1"
             >
-              <span>Ayrıntılı Panel</span>
+              <span>Genişletilmiş Modal</span>
               <ExternalLink className="w-3 h-3" />
             </button>
           </div>
+
+          {/* Export Configuration Panel (Density / Precision + Format) */}
+          {exportConfig && onChangeExportConfig && (
+            <ExportConfigPanel
+              config={exportConfig}
+              onChangeConfig={onChangeExportConfig}
+              statsA={statsA}
+              statsB={statsB}
+              totalTriangles={(statsA?.triangles || 0) + (statsB?.triangles || 0)}
+              compact={true}
+            />
+          )}
 
           {/* Part 1 Box */}
           <div className="bg-blue-950/30 border border-blue-800/40 rounded-xl p-3 space-y-2">
@@ -1408,9 +1837,13 @@ export function ControlsPanel({
                 <span className="w-2 h-2 rounded-full bg-blue-500" />
                 Part 1
               </span>
-              {statsA && <span className="font-mono text-[10px] text-blue-400">{statsA.binarySizeFormatted}</span>}
+              {statsA && (
+                <span className="font-mono text-[10px] text-blue-400">
+                  {exportConfig?.format === 'ascii' ? statsA.asciiSizeFormatted : statsA.binarySizeFormatted}
+                </span>
+              )}
             </div>
-            <p className="text-[10px] text-gray-400">
+            <p className="text-[10px] text-gray-400 font-mono">
               {statsA?.triangles.toLocaleString()} üçgen • Su sızdırmaz düzlem
             </p>
             <button
@@ -1418,7 +1851,7 @@ export function ControlsPanel({
               className="w-full py-1.5 px-3 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-xs font-semibold transition flex items-center justify-center gap-1.5"
             >
               <Download className="w-3.5 h-3.5" />
-              Part 1 STL İndir
+              Part 1 STL İndir ({exportConfig?.format?.toUpperCase() || 'BINARY'})
             </button>
           </div>
 
@@ -1429,9 +1862,13 @@ export function ControlsPanel({
                 <span className="w-2 h-2 rounded-full bg-emerald-500" />
                 Part 2 (Silindirik Soket Delikli)
               </span>
-              {statsB && <span className="font-mono text-[10px] text-emerald-400">{statsB.binarySizeFormatted}</span>}
+              {statsB && (
+                <span className="font-mono text-[10px] text-emerald-400">
+                  {exportConfig?.format === 'ascii' ? statsB.asciiSizeFormatted : statsB.binarySizeFormatted}
+                </span>
+              )}
             </div>
-            <p className="text-[10px] text-gray-400">
+            <p className="text-[10px] text-gray-400 font-mono">
               {statsB?.triangles.toLocaleString()} üçgen • Silindirik hizalama deliği
             </p>
             <button
@@ -1439,7 +1876,7 @@ export function ControlsPanel({
               className="w-full py-1.5 px-3 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-semibold transition flex items-center justify-center gap-1.5"
             >
               <Download className="w-3.5 h-3.5" />
-              Part 2 STL İndir
+              Part 2 STL İndir ({exportConfig?.format?.toUpperCase() || 'BINARY'})
             </button>
           </div>
 
@@ -1477,9 +1914,32 @@ export function ControlsPanel({
             className="w-full py-2.5 px-3 bg-gradient-to-r from-cyan-600 to-emerald-600 hover:from-cyan-500 hover:to-emerald-500 text-white rounded-xl text-xs font-bold transition flex items-center justify-center gap-2 shadow-lg"
           >
             <FolderArchive className="w-4 h-4" />
-            Tüm Parçaları ZIP İndir (3D Baskı)
+            Tüm Parçaları ZIP İndir [{exportConfig?.format?.toUpperCase() || 'BINARY'} • %{Math.round((exportConfig?.density || 1) * 100)}]
           </button>
         </div>
+      )}
+
+      {/* Tab: Batch Processing Queue */}
+      {activeTab === 'batch' && (
+        <BatchQueueTab
+          queue={batchQueue}
+          onUpdateQueue={onUpdateBatchQueue}
+          onOpenBatchModal={onOpenBatchModal}
+          isProcessing={isBatchProcessing}
+          currentProcessingId={currentBatchProcessingId}
+          onStartProcessing={onStartBatchProcessing}
+          onCancelProcessing={onCancelBatchProcessing}
+          onDownloadAllZip={onDownloadAllBatchZip}
+          isExportingAll={isExportingBatchAll}
+          onLoadItemInViewport={onLoadBatchItemInViewport}
+          onDownloadPartA={onExportPartA}
+          onDownloadPartB={onExportPartB}
+          onDownloadDowel={onExportDowelPin}
+          onDownloadItemZip={onExportZip}
+          onAddFiles={onAddBatchFiles}
+          onAddAllPresets={onAddAllBatchPresets}
+          onClearQueue={onClearBatchQueue}
+        />
       )}
 
       {/* Sticky Export Footer */}
@@ -1488,14 +1948,21 @@ export function ControlsPanel({
           <span className="flex items-center gap-1.5">
             <Download className="w-3.5 h-3.5 text-blue-400" /> STL Dışa Aktarma
           </span>
-          {splitResult && (
-            <button
-              onClick={onOpenExportModal}
-              className="text-[11px] text-cyan-400 hover:text-cyan-300 normal-case font-normal underline"
-            >
-              Seçenekler
-            </button>
-          )}
+          <div className="flex items-center gap-1.5">
+            {exportConfig && (
+              <span className="text-[10px] font-mono text-emerald-400 bg-emerald-950/80 border border-emerald-800/60 px-1.5 py-0.2 rounded font-normal normal-case">
+                {exportConfig.format?.toUpperCase()} • %{Math.round((exportConfig.density || 1) * 100)}
+              </span>
+            )}
+            {splitResult && (
+              <button
+                onClick={onOpenExportModal}
+                className="text-[11px] text-cyan-400 hover:text-cyan-300 normal-case font-normal underline"
+              >
+                Seçenekler
+              </button>
+            )}
+          </div>
         </div>
 
         {splitResult ? (
