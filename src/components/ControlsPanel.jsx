@@ -36,7 +36,10 @@ import {
   Settings2,
   Crosshair,
   Flame,
-  Scale
+  Scale,
+  Cpu,
+  Gauge,
+  Activity
 } from 'lucide-react';
 import { SAMPLE_PRESETS } from '../utils/sampleModels';
 import { MATERIAL_THEMES } from '../utils/stlLoaderHelper';
@@ -45,6 +48,7 @@ import { OverhangSupportTab } from './OverhangSupportTab';
 import { ExportConfigPanel } from './ExportConfigPanel';
 import { BatchQueueTab } from './BatchQueueTab';
 import { VolumeMaterialTool } from './VolumeMaterialTool';
+import { getComplexityTier } from './PerformanceOverlay';
 
 export function ControlsPanel({
   modelName,
@@ -522,9 +526,19 @@ export function ControlsPanel({
           <div className="p-4 border-b border-gray-800 flex flex-col gap-2.5">
             <div className="flex items-center justify-between text-xs text-gray-400 font-medium">
               <span>Aktif 3D STL Modeli:</span>
-              <span className="text-emerald-400 font-bold font-mono">
-                {faceCount ? `${faceCount.toLocaleString()} üçgen` : 'Hazır'}
-              </span>
+              <div className="flex items-center gap-1.5 font-mono text-[11px]">
+                <span className="text-emerald-400 font-bold" title="Model Üçgen Sayısı (Triangles)">
+                  {faceCount ? `${faceCount.toLocaleString()} üçgen` : 'Hazır'}
+                </span>
+                {modelInfo?.vertexCount && (
+                  <>
+                    <span className="text-gray-600">•</span>
+                    <span className="text-cyan-400 font-semibold" title="Model Tepe Noktası (Vertex) Sayısı">
+                      {modelInfo.vertexCount.toLocaleString()} vertex
+                    </span>
+                  </>
+                )}
+              </div>
             </div>
 
             <div className="flex items-center gap-2">
@@ -2063,6 +2077,87 @@ export function ControlsPanel({
               </div>
             </div>
           )}
+
+          {/* Model Complexity & Mesh Analysis Card */}
+          {modelInfo && (() => {
+            const meshTriangles = modelInfo.triangleCount || modelInfo.triangles || faceCount || 0;
+            const meshVertices = modelInfo.vertexCount || (meshTriangles > 0 ? meshTriangles * 3 : 0);
+            const compTier = getComplexityTier(meshTriangles);
+
+            return (
+              <div className="bg-gray-950/40 p-3.5 rounded-xl border border-gray-800 flex flex-col gap-2.5">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-1.5 text-xs font-semibold text-gray-300">
+                    <Gauge className="w-4 h-4 text-purple-400" />
+                    <span>Model Ağ Karmaşıklığı (Mesh Complexity)</span>
+                  </div>
+                  <span
+                    className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${compTier.bgColor} ${compTier.textColor} ${compTier.borderColor}`}
+                  >
+                    {compTier.tier} ({Math.round(compTier.progressPercent)}%)
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2 text-xs font-mono">
+                  <div className="bg-gray-900 p-2.5 rounded-lg border border-purple-500/30 flex items-center gap-2">
+                    <Layers className="w-4 h-4 text-purple-400 shrink-0" />
+                    <div className="min-w-0">
+                      <span className="text-gray-400 text-[10px] block">Üçgen (Triangles):</span>
+                      <span className="font-bold text-purple-300 text-sm">
+                        {meshTriangles.toLocaleString('tr-TR')}
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="bg-gray-900 p-2.5 rounded-lg border border-cyan-500/30 flex items-center gap-2">
+                    <Cpu className="w-4 h-4 text-cyan-400 shrink-0" />
+                    <div className="min-w-0">
+                      <span className="text-gray-400 text-[10px] block">Vertex (Tepe):</span>
+                      <span className="font-bold text-cyan-300 text-sm">
+                        {meshVertices.toLocaleString('tr-TR')}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Progress bar meter */}
+                <div className="space-y-1">
+                  <div className="w-full bg-gray-900 rounded-full h-2 overflow-hidden border border-gray-800 flex">
+                    <div
+                      className={`h-full transition-all duration-300 rounded-full ${
+                        compTier.color === 'emerald'
+                          ? 'bg-emerald-400'
+                          : compTier.color === 'sky'
+                          ? 'bg-sky-400'
+                          : compTier.color === 'amber'
+                          ? 'bg-amber-400'
+                          : 'bg-rose-400'
+                      }`}
+                      style={{ width: `${compTier.progressPercent}%` }}
+                    />
+                  </div>
+                  <div className="flex justify-between text-[9px] font-mono text-gray-500">
+                    <span>Düşük (&lt;50K)</span>
+                    <span>Dengeli (250K)</span>
+                    <span>Ağır (800K+)</span>
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-between pt-1 border-t border-gray-800/80 text-[10px] text-gray-400">
+                  <span className="truncate mr-2">{compTier.description}</span>
+                  {onOpenInspector && (
+                    <button
+                      type="button"
+                      onClick={onOpenInspector}
+                      className="text-purple-400 hover:text-purple-300 font-semibold underline shrink-0 cursor-pointer"
+                    >
+                      Detaylı Analiz
+                    </button>
+                  )}
+                </div>
+              </div>
+            );
+          })()}
         </div>
       )}
 

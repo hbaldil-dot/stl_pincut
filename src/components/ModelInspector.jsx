@@ -16,19 +16,26 @@ import {
   Droplet,
   Download,
   FileSpreadsheet,
-  Check
+  Check,
+  Gauge,
+  Activity
 } from 'lucide-react';
 import { calculateModelMass } from '../utils/volumeCalculator';
 import { downloadMetricsFile } from '../utils/exportMetrics';
+import { getComplexityTier } from './PerformanceOverlay';
 
 const DENSITY_PRESETS = [
-  { id: 'pla', name: 'PLA', density: 1.24, color: '#10b981' },
-  { id: 'petg', name: 'PETG', density: 1.27, color: '#06b6d4' },
-  { id: 'abs', name: 'ABS', density: 1.04, color: '#f59e0b' },
-  { id: 'resin', name: 'Reçine', density: 1.10, color: '#14b8a6' },
-  { id: 'tpu', name: 'TPU', density: 1.21, color: '#8b5cf6' },
-  { id: 'alu', name: 'Alüminyum', density: 2.70, color: '#94a3b8' },
-  { id: 'steel', name: 'Çelik', density: 7.85, color: '#e2e8f0' }
+  { id: 'pla', name: 'PLA', density: 1.24, label: 'PLA: 1.24 g/cm³', color: '#10b981' },
+  { id: 'pla_plus', name: 'PLA+', density: 1.25, label: 'PLA+: 1.25 g/cm³', color: '#38bdf8' },
+  { id: 'petg', name: 'PETG', density: 1.27, label: 'PETG: 1.27 g/cm³', color: '#06b6d4' },
+  { id: 'abs', name: 'ABS', density: 1.04, label: 'ABS: 1.04 g/cm³', color: '#f59e0b' },
+  { id: 'asa', name: 'ASA', density: 1.07, label: 'ASA: 1.07 g/cm³', color: '#ea580c' },
+  { id: 'tpu', name: 'TPU', density: 1.21, label: 'TPU: 1.21 g/cm³', color: '#8b5cf6' },
+  { id: 'nylon', name: 'Naylon (PA)', density: 1.14, label: 'Naylon: 1.14 g/cm³', color: '#ec4899' },
+  { id: 'pc', name: 'PC', density: 1.20, label: 'PC: 1.20 g/cm³', color: '#6366f1' },
+  { id: 'resin', name: 'Reçine (SLA)', density: 1.10, label: 'Reçine: 1.10 g/cm³', color: '#14b8a6' },
+  { id: 'alu', name: 'Alüminyum', density: 2.70, label: 'Alüminyum: 2.70 g/cm³', color: '#94a3b8' },
+  { id: 'steel', name: 'Çelik', density: 7.85, label: 'Çelik: 7.85 g/cm³', color: '#e2e8f0' }
 ];
 
 export function ModelInspector({
@@ -95,6 +102,10 @@ export function ModelInspector({
   const massStats = useMemo(() => {
     return calculateModelMass(volumeCm3, numDensity);
   }, [volumeCm3, numDensity]);
+
+  const triangles = info.triangleCount ?? info.triangles ?? 0;
+  const vertices = info.vertexCount ?? (triangles > 0 ? triangles * 3 : 0);
+  const complexity = useMemo(() => getComplexityTier(triangles), [triangles]);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm animate-fade-in">
@@ -198,24 +209,162 @@ export function ModelInspector({
             </div>
           </div>
 
-          {/* Mesh Properties */}
+          {/* Model Complexity & Mesh Analysis Gauge */}
+          <div className="bg-gray-950/60 p-4 rounded-2xl border border-gray-800 space-y-3.5 shadow-md">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 bg-indigo-500/15 text-indigo-400 rounded-xl border border-indigo-500/30">
+                  <Gauge className="w-4 h-4" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <span className="font-bold text-gray-200 text-xs">Model Karmaşıklığı & Ağ Analizi</span>
+                    <span
+                      className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${complexity.bgColor} ${complexity.textColor} ${complexity.borderColor}`}
+                    >
+                      {complexity.label}
+                    </span>
+                  </div>
+                  <span className="text-[10px] text-gray-400">Üçgen ve tepe noktası (vertex) yoğunluk değerlendirmesi</span>
+                </div>
+              </div>
+
+              <div className="text-right">
+                <span className="text-xs font-mono font-bold text-gray-200">
+                  %{Math.round(complexity.progressPercent)}
+                </span>
+                <span className="text-[9px] text-gray-500 block">karmaşıklık</span>
+              </div>
+            </div>
+
+            {/* Triangle & Vertex Primary Metric Cards */}
+            <div className="grid grid-cols-2 gap-3">
+              <div className="bg-gray-900/90 p-3 rounded-xl border border-purple-500/30 flex items-center gap-3">
+                <div className="p-2 bg-purple-500/15 rounded-lg border border-purple-500/30 shrink-0">
+                  <Layers className="w-4 h-4 text-purple-400" />
+                </div>
+                <div className="min-w-0">
+                  <span className="text-[10px] font-medium text-gray-400 block truncate">
+                    Toplam Üçgen (Triangles)
+                  </span>
+                  <div className="flex items-baseline gap-1">
+                    <span className="font-extrabold text-purple-300 font-mono text-base">
+                      {triangles.toLocaleString('tr-TR')}
+                    </span>
+                    <span className="text-[10px] text-purple-400 font-mono">yüzey</span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="bg-gray-900/90 p-3 rounded-xl border border-cyan-500/30 flex items-center gap-3">
+                <div className="p-2 bg-cyan-500/15 rounded-lg border border-cyan-500/30 shrink-0">
+                  <Cpu className="w-4 h-4 text-cyan-400" />
+                </div>
+                <div className="min-w-0">
+                  <span className="text-[10px] font-medium text-gray-400 block truncate">
+                    Tepe Noktası (Vertices)
+                  </span>
+                  <div className="flex items-baseline gap-1">
+                    <span className="font-extrabold text-cyan-300 font-mono text-base">
+                      {vertices.toLocaleString('tr-TR')}
+                    </span>
+                    <span className="text-[10px] text-cyan-400 font-mono">nokta</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Visual Multi-Segment Complexity Meter */}
+            <div className="space-y-1.5 bg-gray-900/50 p-2.5 rounded-xl border border-gray-800">
+              <div className="flex items-center justify-between text-[10px] text-gray-400 mb-0.5">
+                <span>Model Karmaşıklık Skalası:</span>
+                <span className="font-mono font-semibold text-gray-300">
+                  {triangles < 50000 ? 'Hafif / Hızlı' : triangles <= 250000 ? 'Optimum Geometri' : triangles <= 800000 ? 'Yüksek Detay' : 'Ağır / Ultra Poligon'}
+                </span>
+              </div>
+
+              <div className="w-full bg-gray-950 rounded-full h-2.5 overflow-hidden p-0.5 border border-gray-800 flex gap-0.5">
+                {/* 4 segments: Low (0-25%), Balanced (25-50%), High (50-75%), Ultra (75-100%) */}
+                <div className="h-full rounded-l-full relative flex-1 bg-gray-900 overflow-hidden">
+                  <div
+                    className="h-full rounded-l-full bg-emerald-500 transition-all duration-500"
+                    style={{
+                      width: complexity.progressPercent < 25 ? `${(complexity.progressPercent / 25) * 100}%` : '100%'
+                    }}
+                  />
+                </div>
+                <div className="h-full relative flex-1 bg-gray-900 overflow-hidden">
+                  <div
+                    className="h-full bg-sky-500 transition-all duration-500"
+                    style={{
+                      width:
+                        complexity.progressPercent >= 25 && complexity.progressPercent < 50
+                          ? `${((complexity.progressPercent - 25) / 25) * 100}%`
+                          : complexity.progressPercent >= 50
+                          ? '100%'
+                          : '0%'
+                    }}
+                  />
+                </div>
+                <div className="h-full relative flex-1 bg-gray-900 overflow-hidden">
+                  <div
+                    className="h-full bg-amber-500 transition-all duration-500"
+                    style={{
+                      width:
+                        complexity.progressPercent >= 50 && complexity.progressPercent < 75
+                          ? `${((complexity.progressPercent - 50) / 25) * 100}%`
+                          : complexity.progressPercent >= 75
+                          ? '100%'
+                          : '0%'
+                    }}
+                  />
+                </div>
+                <div className="h-full rounded-r-full relative flex-1 bg-gray-900 overflow-hidden">
+                  <div
+                    className="h-full rounded-r-full bg-rose-500 transition-all duration-500"
+                    style={{
+                      width:
+                        complexity.progressPercent >= 75
+                          ? `${((complexity.progressPercent - 75) / 25) * 100}%`
+                          : '0%'
+                    }}
+                  />
+                </div>
+              </div>
+
+              {/* Scale Labels */}
+              <div className="flex justify-between text-[9px] font-mono px-1 text-gray-500">
+                <span className={triangles < 50000 ? 'text-emerald-400 font-bold' : ''}>0 - 50K (Düşük)</span>
+                <span className={triangles >= 50000 && triangles <= 250000 ? 'text-sky-400 font-bold' : ''}>50K - 250K (Dengeli)</span>
+                <span className={triangles > 250000 && triangles <= 800000 ? 'text-amber-400 font-bold' : ''}>250K - 800K (Yüksek)</span>
+                <span className={triangles > 800000 ? 'text-rose-400 font-bold' : ''}>800K+ (Ultra)</span>
+              </div>
+            </div>
+
+            {/* Slicer Performance & Suitability Guidance */}
+            <div className="bg-gray-900/60 p-2.5 rounded-xl border border-gray-800/80 flex items-start gap-2.5">
+              <Activity className="w-4 h-4 text-indigo-400 shrink-0 mt-0.5" />
+              <div className="space-y-1 text-[10px]">
+                <div className="text-gray-200 font-medium leading-relaxed">
+                  {complexity.slicerAdvice}
+                </div>
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-gray-400 font-mono text-[9px] pt-1 border-t border-gray-800/60">
+                  <span>Dilimleme Yükü: <strong className="text-gray-200">{complexity.description}</strong></span>
+                  <span>•</span>
+                  <span>Mesh Dosya Boyutu: <strong className="text-gray-200">{formatBytes(info.fileSize)}</strong></span>
+                  {triangles > 0 && (
+                    <>
+                      <span>•</span>
+                      <span>Vertex/Üçgen Oranı: <strong className="text-gray-200">{(vertices / triangles).toFixed(2)}</strong></span>
+                    </>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Volume & Surface Area Measurements */}
           <div className="grid grid-cols-2 gap-3">
-            <div className="bg-gray-950/40 p-3 rounded-xl border border-gray-800 flex items-center gap-2.5">
-              <Layers className="w-4 h-4 text-purple-400 shrink-0" />
-              <div>
-                <span className="text-[10px] text-gray-400 block">Üçgen (Yüzey) Sayısı</span>
-                <span className="font-bold text-gray-200 font-mono">{info.triangleCount.toLocaleString()}</span>
-              </div>
-            </div>
-
-            <div className="bg-gray-950/40 p-3 rounded-xl border border-gray-800 flex items-center gap-2.5">
-              <Cpu className="w-4 h-4 text-cyan-400 shrink-0" />
-              <div>
-                <span className="text-[10px] text-gray-400 block">Tepe Noktası (Vertex)</span>
-                <span className="font-bold text-gray-200 font-mono">{info.vertexCount.toLocaleString()}</span>
-              </div>
-            </div>
-
             <div className="bg-gray-950/40 p-3 rounded-xl border border-gray-800 flex items-center justify-between gap-2">
               <div className="flex items-center gap-2.5">
                 <Box className="w-4 h-4 text-amber-400 shrink-0" />
@@ -344,13 +493,42 @@ export function ModelInspector({
 
             {/* Density Input Field & Presets */}
             <div className="space-y-2">
-              <div className="flex items-center justify-between gap-3 bg-gray-950/80 p-2.5 rounded-xl border border-gray-800">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 bg-gray-950/80 p-2.5 rounded-xl border border-gray-800">
                 <label className="text-[11px] font-medium text-gray-300 flex items-center gap-1.5">
-                  <Droplet className="w-3.5 h-3.5 text-cyan-400" />
+                  <Droplet className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
                   <span>Malzeme Yoğunluğu (Density):</span>
                 </label>
 
-                <div className="flex items-center gap-1.5">
+                <div className="flex items-center gap-1.5 flex-wrap sm:flex-nowrap">
+                  {/* Preset Dropdown Menu */}
+                  <select
+                    value={
+                      DENSITY_PRESETS.find(
+                        (p) => Math.abs(parseFloat(density) - p.density) < 0.005
+                      )?.density.toString() || ''
+                    }
+                    onChange={(e) => {
+                      if (e.target.value) {
+                        setDensity(e.target.value);
+                      }
+                    }}
+                    className="bg-gray-900 border border-gray-700 hover:border-emerald-500/60 focus:border-emerald-400 text-gray-200 text-xs rounded-lg px-2.5 py-1 font-medium cursor-pointer focus:outline-none focus:ring-1 focus:ring-emerald-400 transition"
+                    title="Malzeme Önayarı Seç (PLA, PETG, ABS...)"
+                  >
+                    <option value="" disabled>
+                      Önayar Seç...
+                    </option>
+                    {DENSITY_PRESETS.map((preset) => (
+                      <option
+                        key={preset.id}
+                        value={preset.density.toString()}
+                        className="bg-gray-900 text-gray-200"
+                      >
+                        {preset.name}: {preset.density} g/cm³
+                      </option>
+                    ))}
+                  </select>
+
                   <input
                     type="number"
                     step="0.01"
@@ -358,10 +536,11 @@ export function ModelInspector({
                     max="30"
                     value={density}
                     onChange={(e) => setDensity(e.target.value)}
-                    className="w-24 bg-gray-900 border border-emerald-500/50 focus:border-emerald-400 rounded-lg px-2.5 py-1 text-right font-mono font-bold text-white text-xs focus:outline-none focus:ring-1 focus:ring-emerald-400"
+                    className="w-20 bg-gray-900 border border-emerald-500/50 focus:border-emerald-400 rounded-lg px-2.5 py-1 text-right font-mono font-bold text-white text-xs focus:outline-none focus:ring-1 focus:ring-emerald-400"
                     placeholder="1.24"
+                    title="Yoğunluk değerini manuel girin"
                   />
-                  <span className="text-[11px] font-mono text-emerald-400 font-semibold bg-gray-900 px-2 py-1 rounded border border-gray-800">
+                  <span className="text-[11px] font-mono text-emerald-400 font-semibold bg-gray-900 px-2 py-1 rounded border border-gray-800 shrink-0">
                     g/cm³
                   </span>
                 </div>

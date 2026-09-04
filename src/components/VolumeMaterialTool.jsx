@@ -23,6 +23,7 @@ import {
   Activity,
   Shield,
   Gauge,
+  Cpu,
   Download,
   FileCode,
   FileSpreadsheet
@@ -649,11 +650,17 @@ export function VolumeMaterialTool({
               {/* Mesh Polygon & Triangle Quality */}
               <div className="bg-gray-950/70 p-2.5 rounded-xl border border-gray-800/80 space-y-1">
                 <div className="flex items-center justify-between">
-                  <span className="text-[10px] text-gray-400 font-medium">Ağ / Üçgen Kalitesi</span>
+                  <span className="text-[10px] text-gray-400 font-medium">Ağ / Üçgen & Vertex Sayımı</span>
                   <Layers className="w-3.5 h-3.5 text-cyan-400" />
                 </div>
                 <div className="text-base font-black font-mono text-cyan-300">
                   {modelVolumeStats.triangleCount.toLocaleString('tr-TR')} <span className="text-[10px] font-normal text-gray-400">üçgen</span>
+                </div>
+                <div className="text-[10px] text-gray-300 font-mono flex items-center justify-between pt-0.5">
+                  <span className="text-gray-400">Tepe Noktası (Vertex):</span>
+                  <strong className="text-white font-mono">
+                    {(modelInfo?.vertexCount || (modelVolumeStats.triangleCount > 0 ? modelVolumeStats.triangleCount * 3 : 0)).toLocaleString('tr-TR')}
+                  </strong>
                 </div>
                 <div className="text-[10px] text-gray-300 font-mono">
                   Ortalama: <strong className="text-white">{modelVolumeStats.averageTriangleAreaMm2} mm²</strong> / poligon
@@ -920,18 +927,44 @@ export function VolumeMaterialTool({
           </span>
         </div>
 
-        {/* Dedicated Material Density Input Field */}
+        {/* Dedicated Material Density Input Field & Presets Dropdown */}
         <div className="bg-gray-950/90 p-3 rounded-xl border border-gray-800 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-inner">
           <div>
             <span className="text-[11px] font-semibold text-gray-200 block">
               Malzeme Yoğunluğu (g/cm³)
             </span>
             <span className="text-[10px] text-gray-400 block">
-              Doğrudan yoğunluk değeri girin veya aşağıdaki hazır profillerden birini seçin
+              Açılır menüden hazır önayar seçin veya doğrudan yoğunluk değeri girin
             </span>
           </div>
 
-          <div className="flex items-center gap-1.5 shrink-0">
+          <div className="flex items-center gap-1.5 shrink-0 flex-wrap sm:flex-nowrap">
+            {/* Common Material Presets Dropdown Menu */}
+            <select
+              value={
+                PRINT_MATERIALS.find(
+                  (m) => m.id !== 'custom' && Math.abs(m.density - parseFloat(densityInput)) < 0.005
+                )?.id || (selectedMaterialId !== 'custom' ? selectedMaterialId : '')
+              }
+              onChange={(e) => {
+                const found = PRINT_MATERIALS.find((m) => m.id === e.target.value);
+                if (found) {
+                  handleSelectMaterial(found);
+                }
+              }}
+              className="bg-gray-900 border border-gray-700 hover:border-cyan-500/60 focus:border-cyan-400 text-gray-200 text-xs rounded-lg px-2.5 py-1.5 font-medium cursor-pointer focus:outline-none focus:ring-1 focus:ring-cyan-400 transition"
+              title="Yaygın Malzeme Önayarları (PLA, PETG, ABS, Reçine, Alüminyum...)"
+            >
+              <option value="" disabled>
+                Önayar Seç...
+              </option>
+              {PRINT_MATERIALS.filter((m) => m.id !== 'custom').map((mat) => (
+                <option key={mat.id} value={mat.id} className="bg-gray-900 text-gray-200">
+                  {mat.shortName || mat.name}: {mat.density} g/cm³
+                </option>
+              ))}
+            </select>
+
             <input
               type="number"
               step="0.01"
@@ -939,8 +972,9 @@ export function VolumeMaterialTool({
               max="30"
               value={densityInput}
               onChange={(e) => handleDensityChange(e.target.value)}
-              className="w-24 bg-gray-900 border border-cyan-500/50 focus:border-cyan-400 rounded-lg px-2.5 py-1.5 text-right font-mono font-bold text-white text-xs focus:outline-none focus:ring-1 focus:ring-cyan-400 shadow-inner"
+              className="w-20 bg-gray-900 border border-cyan-500/50 focus:border-cyan-400 rounded-lg px-2.5 py-1.5 text-right font-mono font-bold text-white text-xs focus:outline-none focus:ring-1 focus:ring-cyan-400 shadow-inner"
               placeholder="1.24"
+              title="Yoğunluk değerini elle girin"
             />
             <span className="text-[11px] font-mono text-cyan-400 font-semibold bg-gray-900 px-2 py-1.5 rounded-lg border border-gray-800">
               g/cm³

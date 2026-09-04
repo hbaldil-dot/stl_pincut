@@ -41,7 +41,7 @@ function formatCompactNumber(num) {
 /**
  * Calculates model complexity tier based on triangle count
  */
-function getComplexityTier(triangles) {
+export function getComplexityTier(triangles) {
   if (triangles < 50000) {
     return {
       tier: 'Düşük',

@@ -404,6 +404,32 @@ export const PRINT_MATERIALS = [
     description: 'Sıvı reçine fotopolimer. Mikron düzeyinde pürüzsüz yüzey detayları.'
   },
   {
+    id: 'aluminum',
+    name: 'Alüminyum (6061 CNC / Talaşlı İmalat)',
+    shortName: 'Alüminyum',
+    category: 'metal',
+    density: 2.70,
+    typicalTemp: '—',
+    bedTemp: '—',
+    defaultPricePerKg: 18,
+    defaultCurrency: '$',
+    color: '#94a3b8',
+    description: 'Hafif metal, prototip ve havacılık/savunma parçaları talaşlı imalatı.'
+  },
+  {
+    id: 'steel',
+    name: 'Çelik (Paslanmaz / Karbon Çeliği)',
+    shortName: 'Çelik',
+    category: 'metal',
+    density: 7.85,
+    typicalTemp: '—',
+    bedTemp: '—',
+    defaultPricePerKg: 12,
+    defaultCurrency: '$',
+    color: '#e2e8f0',
+    description: 'Yüksek yoğunluklu ve aşırı mukavemetli endüstriyel metal parçalar.'
+  },
+  {
     id: 'custom',
     name: 'Özel Malzeme / Yoğunluk',
     shortName: 'Özel',
