@@ -7,10 +7,20 @@ import { ExportModal } from './components/ExportModal';
 import { HistoryPanel } from './components/HistoryPanel';
 import { MeshListPanel } from './components/MeshListPanel';
 import { BatchProcessingModal } from './components/BatchProcessingModal';
+import { VolumeMaterialModal } from './components/VolumeMaterialModal';
 import { loadSamplePreset, parseCustomSTL, MATERIAL_THEMES } from './utils/stlLoaderHelper';
 import { SAMPLE_PRESETS } from './utils/sampleModels';
 import { sliceMeshWithPlane, sliceMeshWithLasso } from './utils/meshSlicer';
 import { createWorkspaceSnapshot, restoreWorkspaceSnapshot } from './utils/historyManager';
+import {
+  CommandStack,
+  ModelTransformCommand,
+  CutPlaneAdjustCommand,
+  PinPlacementCommand,
+  SplitModelCommand,
+  MeasureCommand,
+  InitialModelCommand
+} from './utils/commandPattern';
 import {
   downloadMeshSTL,
   downloadCombinedSTL,
@@ -62,8 +72,13 @@ export function App() {
     negate: false,
     showPlaneHelper: true,
     addPinOnSlice: true,
+    highlightInterior: true,
+    interiorColor: '#f59e0b',
     normal: new THREE.Vector3(0, 1, 0)
   });
+
+  // Cross-Section & Internal Geometry Inspection HUD state
+  const [isCrossSectionHUDOpen, setIsCrossSectionHUDOpen] = useState(false);
 
   // Lasso Painting / Freehand points
   const [isDrawing, setIsDrawing] = useState(false);
@@ -111,6 +126,7 @@ export function App() {
   const [showBoundingBox, setShowBoundingBox] = useState(false);
   const [autoRotate, setAutoRotate] = useState(false);
   const [isInspectorOpen, setIsInspectorOpen] = useState(false);
+  const [isVolumeModalOpen, setIsVolumeModalOpen] = useState(false);
   const [isMeshListOpen, setIsMeshListOpen] = useState(false);
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
   const [showPostCutBanner, setShowPostCutBanner] = useState(false);
@@ -147,13 +163,76 @@ export function App() {
     dowelPin: { visible: true, wireframe: false, opacity: 1.0, materialTheme: null, customColor: null }
   });
 
-  // Undo / Redo / History State
+  // Undo / Redo / History State (Backed by Command Pattern Stack)
   const [history, setHistory] = useState([]);
   const [historyIndex, setHistoryIndex] = useState(-1);
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
   const isRestoringRef = useRef(false);
-  const lastActionTimeRef = useRef(0);
-  const lastSubTypeRef = useRef(null);
+
+  // Up-to-date state references for Commands
+  const modelRotationRef = useRef(modelRotation);
+  modelRotationRef.current = modelRotation;
+
+  const clippingConfigRef = useRef(clippingConfig);
+  clippingConfigRef.current = clippingConfig;
+
+  const pinConfigRef = useRef(pinConfig);
+  pinConfigRef.current = pinConfig;
+
+  const splitResultRef = useRef(splitResult);
+  splitResultRef.current = splitResult;
+
+  const measurePointARef = useRef(measurePointA);
+  measurePointARef.current = measurePointA;
+
+  const measurePointBRef = useRef(measurePointB);
+  measurePointBRef.current = measurePointB;
+
+  const isMeasureActiveRef = useRef(isMeasureActive);
+  isMeasureActiveRef.current = isMeasureActive;
+
+  const activeModeRef = useRef(activeMode);
+  activeModeRef.current = activeMode;
+
+  const isDraggingRotationRef = useRef(false);
+  const rotationBeforeDragRef = useRef(modelRotation);
+
+  // Command Context provided to Command instances for executing/undoing/redoing state updates
+  const commandContext = useMemo(() => ({
+    setModelRotation: (rot) => setModelRotation(rot),
+    setClippingConfig: (cfg) => setClippingConfig(cfg),
+    setPinConfig: (pin) => setPinConfig(pin),
+    setSplitResult: (res) => {
+      setSplitResult(res);
+      setShowPostCutBanner(!!res);
+    },
+    setShowPostCutBanner: (show) => setShowPostCutBanner(show),
+    setMeasurePointA: (pt) => setMeasurePointA(pt),
+    setMeasurePointB: (pt) => setMeasurePointB(pt),
+    setIsMeasureActive: (act) => setIsMeasureActive(act),
+    setDrawnPoints: (pts) => setDrawnPoints(pts),
+    setIsLoopClosed: (closed) => setIsLoopClosed(closed),
+    setLoopPoints: (pts) => setLoopPoints(pts),
+    setActiveMode: (mode) => setActiveMode(mode)
+  }), []);
+
+  // Central CommandStack Invoker
+  const commandStackRef = useRef(null);
+  if (!commandStackRef.current) {
+    commandStackRef.current = new CommandStack({
+      maxHistory: 60,
+      onStateChange: (state) => {
+        setHistory(state.historyList);
+        setHistoryIndex(state.currentIndex);
+      }
+    });
+  }
+
+  // Executes a Command instance via the CommandStack invoker
+  const executeCommand = (command) => {
+    if (isRestoringRef.current) return;
+    commandStackRef.current.execute(command, commandContext);
+  };
 
   // Batch Processing Queue State
   const [isBatchModalOpen, setIsBatchModalOpen] = useState(false);
@@ -166,151 +245,129 @@ export function App() {
   const controlsRef = useRef(null);
 
   /**
-   * Pushes a new snapshot onto the Undo/Redo history stack
+   * Universal adapter routing actions into concrete Command objects
    */
   const pushHistory = (description, type, overrides = {}, subType = null, isContinuous = false) => {
     if (isRestoringRef.current) return;
 
-    const currentClipping = overrides.clippingConfig !== undefined ? overrides.clippingConfig : clippingConfig;
-    const currentPin = overrides.pinConfig !== undefined ? overrides.pinConfig : pinConfig;
-
-    const snapshot = createWorkspaceSnapshot({
-      description,
-      type,
-      subType,
-      modelRotation: overrides.modelRotation !== undefined ? overrides.modelRotation : modelRotation,
-      splitResult: overrides.splitResult !== undefined ? overrides.splitResult : splitResult,
-      pinConfig: currentPin,
-      clippingConfig: currentClipping,
-      drawnPoints: overrides.drawnPoints !== undefined ? overrides.drawnPoints : drawnPoints,
-      isLoopClosed: overrides.isLoopClosed !== undefined ? overrides.isLoopClosed : isLoopClosed,
-      loopPoints: overrides.loopPoints !== undefined ? overrides.loopPoints : loopPoints,
-      measurePointA: overrides.measurePointA !== undefined ? overrides.measurePointA : measurePointA,
-      measurePointB: overrides.measurePointB !== undefined ? overrides.measurePointB : measurePointB,
-      isMeasureActive: overrides.isMeasureActive !== undefined ? overrides.isMeasureActive : isMeasureActive,
-      activeMode: overrides.activeMode !== undefined ? overrides.activeMode : activeMode,
-      explodedDistance: overrides.explodedDistance !== undefined ? overrides.explodedDistance : explodedDistance
-    });
-
-    const now = Date.now();
-    const currentIdx = historyIndex;
-    const last = currentIdx >= 0 && currentIdx < history.length ? history[currentIdx] : null;
-
-    const shouldCoalesce =
-      isContinuous &&
-      last &&
-      last.type === type &&
-      last.subType &&
-      subType &&
-      last.subType === subType &&
-      now - lastActionTimeRef.current < 800;
-
-    lastActionTimeRef.current = now;
-    lastSubTypeRef.current = subType;
-
-    if (shouldCoalesce) {
-      setHistory((prev) => {
-        const copy = [...prev];
-        copy[currentIdx] = snapshot;
-        return copy;
+    if (type === 'MODEL_ROTATE' || type === 'MODEL_ALIGN') {
+      const targetRot = overrides.modelRotation !== undefined ? overrides.modelRotation : modelRotationRef.current;
+      const cmd = new ModelTransformCommand({
+        previousRotation: modelRotationRef.current,
+        newRotation: targetRot,
+        description,
+        subType: subType || (type === 'MODEL_ALIGN' ? 'rotation_snap' : 'rotation_drag'),
+        isContinuous
       });
-    } else {
-      setHistory((prev) => {
-        const truncated = prev.slice(0, currentIdx + 1);
-        const next = [...truncated, snapshot];
-        if (next.length > 50) next.shift();
-        return next;
-      });
-      setHistoryIndex((prev) => {
-        const nextIdx = Math.min(prev + 1, 49);
-        return nextIdx;
-      });
-    }
-  };
-
-  /**
-   * Restores a full workspace snapshot
-   */
-  const applySnapshot = (snapshot, toastMsg) => {
-    if (!snapshot) return;
-    isRestoringRef.current = true;
-    const restored = restoreWorkspaceSnapshot(snapshot);
-    if (!restored) {
-      isRestoringRef.current = false;
+      executeCommand(cmd);
       return;
     }
 
-    if (restored.modelRotation) {
-      setModelRotation(restored.modelRotation);
-    }
-    setSplitResult(restored.splitResult);
-    setPinConfig(restored.pinConfig);
-    setClippingConfig(restored.clippingConfig);
-    setDrawnPoints(restored.drawnPoints);
-    setIsLoopClosed(restored.isLoopClosed);
-    setLoopPoints(restored.loopPoints);
-    setMeasurePointA(restored.measurePointA);
-    setMeasurePointB(restored.measurePointB);
-    setIsMeasureActive(restored.isMeasureActive);
-    setActiveMode(restored.activeMode);
-    setExplodedDistance(restored.explodedDistance);
-
-    if (restored.splitResult) {
-      setShowPostCutBanner(true);
-    } else {
-      setShowPostCutBanner(false);
+    if (type === 'CLIPPING_CONFIG') {
+      const targetClip = overrides.clippingConfig !== undefined ? overrides.clippingConfig : clippingConfigRef.current;
+      const cmd = new CutPlaneAdjustCommand({
+        previousConfig: clippingConfigRef.current,
+        newConfig: targetClip,
+        description,
+        subType: subType || 'clipping_general',
+        isContinuous
+      });
+      executeCommand(cmd);
+      return;
     }
 
-    if (toastMsg) {
-      setStatusMessage(toastMsg);
+    if (type === 'PIN_CONFIG' || type === 'PIN_PLACEMENT') {
+      const targetPin = overrides.pinConfig !== undefined ? overrides.pinConfig : pinConfigRef.current;
+      const cmd = new PinPlacementCommand({
+        previousConfig: pinConfigRef.current,
+        newConfig: targetPin,
+        description,
+        subType: subType || 'pin_general',
+        isContinuous
+      });
+      executeCommand(cmd);
+      return;
     }
 
+    if (type === 'CUT_PLANE' || type === 'CUT_LASSO' || type === 'RESET_SPLIT') {
+      const targetSplit = overrides.splitResult !== undefined ? overrides.splitResult : splitResultRef.current;
+      const cmd = new SplitModelCommand({
+        previousSplitResult: splitResultRef.current,
+        newSplitResult: targetSplit,
+        description,
+        subType: type === 'RESET_SPLIT' ? 'split_reset' : type === 'CUT_LASSO' ? 'split_lasso' : 'split_plane'
+      });
+      executeCommand(cmd);
+      return;
+    }
+
+    if (type.startsWith('MEASURE_')) {
+      const prevA = measurePointARef.current;
+      const prevB = measurePointBRef.current;
+      const nextA = overrides.measurePointA !== undefined ? overrides.measurePointA : prevA;
+      const nextB = overrides.measurePointB !== undefined ? overrides.measurePointB : prevB;
+      const cmd = new MeasureCommand({
+        previousMeasure: { pointA: prevA, pointB: prevB, isMeasureActive: isMeasureActiveRef.current },
+        newMeasure: { pointA: nextA, pointB: nextB, isMeasureActive: isMeasureActiveRef.current },
+        description,
+        subType: type.toLowerCase()
+      });
+      executeCommand(cmd);
+      return;
+    }
+  };
+
+  const canUndo = commandStackRef.current ? commandStackRef.current.canUndo() : false;
+  const canRedo = commandStackRef.current ? commandStackRef.current.canRedo() : false;
+
+  const undoCmd = commandStackRef.current ? commandStackRef.current.getUndoCommand() : null;
+  const redoCmd = commandStackRef.current ? commandStackRef.current.getRedoCommand() : null;
+  const undoActionDesc = undoCmd ? undoCmd.description : null;
+  const redoActionDesc = redoCmd ? redoCmd.description : null;
+  const undoTooltip = canUndo ? `Geri Al (Ctrl+Z): ${undoActionDesc || ''}` : 'Geri Alınacak işlem yok';
+  const redoTooltip = canRedo ? `Yinele (Ctrl+Y): ${redoActionDesc || ''}` : 'Yinelenecek işlem yok';
+
+  const handleUndo = () => {
+    if (!commandStackRef.current || !commandStackRef.current.canUndo()) return;
+    isRestoringRef.current = true;
+    const undoneCmd = commandStackRef.current.undo(commandContext);
+    if (undoneCmd) {
+      setStatusMessage(`Geri Alındı: ${undoneCmd.description}`);
+    }
     setTimeout(() => {
       isRestoringRef.current = false;
     }, 50);
   };
 
-  const canUndo = historyIndex > 0;
-  const canRedo = historyIndex < history.length - 1;
-
-  const undoActionDesc = historyIndex > 0 && history[historyIndex] ? history[historyIndex].description : null;
-  const redoActionDesc = historyIndex < history.length - 1 && history[historyIndex + 1] ? history[historyIndex + 1].description : null;
-  const undoTooltip = canUndo ? `Geri Al (Ctrl+Z): ${undoActionDesc || ''}` : 'Geri Alınacak işlem yok';
-  const redoTooltip = canRedo ? `Yinele (Ctrl+Y): ${redoActionDesc || ''}` : 'Yinelenecek işlem yok';
-
-  const handleUndo = () => {
-    if (historyIndex > 0) {
-      const targetIdx = historyIndex - 1;
-      const targetSnapshot = history[targetIdx];
-      const undoneSnapshot = history[historyIndex];
-      setHistoryIndex(targetIdx);
-      applySnapshot(targetSnapshot, `Geri Alındı: ${undoneSnapshot ? undoneSnapshot.description : targetSnapshot.description}`);
-    }
-  };
-
   const handleRedo = () => {
-    if (historyIndex < history.length - 1) {
-      const targetIdx = historyIndex + 1;
-      const targetSnapshot = history[targetIdx];
-      setHistoryIndex(targetIdx);
-      applySnapshot(targetSnapshot, `Yinelendi: ${targetSnapshot.description}`);
+    if (!commandStackRef.current || !commandStackRef.current.canRedo()) return;
+    isRestoringRef.current = true;
+    const redoneCmd = commandStackRef.current.redo(commandContext);
+    if (redoneCmd) {
+      setStatusMessage(`Yinelendi: ${redoneCmd.description}`);
     }
+    setTimeout(() => {
+      isRestoringRef.current = false;
+    }, 50);
   };
 
   const handleJumpToHistory = (index) => {
-    if (index >= 0 && index < history.length) {
-      const targetSnapshot = history[index];
-      setHistoryIndex(index);
-      applySnapshot(targetSnapshot, `Adıma Dönüldü (#${index + 1}): ${targetSnapshot.description}`);
+    if (!commandStackRef.current) return;
+    isRestoringRef.current = true;
+    const targetCmd = commandStackRef.current.jumpTo(index, commandContext);
+    if (targetCmd) {
+      setStatusMessage(`Adıma Dönüldü (#${index + 1}): ${targetCmd.description}`);
     }
+    setTimeout(() => {
+      isRestoringRef.current = false;
+    }, 50);
   };
 
   const handleClearHistory = () => {
-    if (history.length > 0 && history[historyIndex]) {
-      setHistory([history[historyIndex]]);
-      setHistoryIndex(0);
-      setStatusMessage('İşlem geçmişi temizlendi.');
-    }
+    if (!commandStackRef.current) return;
+    const currentCmd = commandStackRef.current.commands[historyIndex];
+    commandStackRef.current.clear(currentCmd);
+    setStatusMessage('İşlem geçmişi temizlendi.');
   };
 
   // Load initial preset
@@ -321,45 +378,27 @@ export function App() {
   // Update plane normal whenever axis, custom rotation, offset, or toggles change
   const handleClippingConfigChange = (changes, isContinuous = false) => {
     let nextNormal = new THREE.Vector3(0, 1, 0);
-    let nextConfig = null;
+    const prevConfig = clippingConfigRef.current;
+    const nextConfig = { ...prevConfig, ...changes };
 
-    setClippingConfig((prev) => {
-      const next = { ...prev, ...changes };
-
-      if (next.axis === 'x') {
-        nextNormal.set(1, 0, 0);
-      } else if (next.axis === 'y') {
-        nextNormal.set(0, 1, 0);
-      } else if (next.axis === 'z') {
-        nextNormal.set(0, 0, 1);
-      } else if (next.axis === 'custom') {
-        const radX = THREE.MathUtils.degToRad(next.rotX || 0);
-        const radY = THREE.MathUtils.degToRad(next.rotY || 0);
-        const radZ = THREE.MathUtils.degToRad(next.rotZ || 0);
+    if (nextConfig.axis === 'x') {
+      nextNormal.set(1, 0, 0);
+    } else if (nextConfig.axis === 'y') {
+      nextNormal.set(0, 1, 0);
+    } else if (nextConfig.axis === 'z') {
+      nextNormal.set(0, 0, 1);
+    } else if (nextConfig.axis === 'custom') {
+      if (changes.normal) {
+        nextNormal.copy(changes.normal).normalize();
+      } else {
+        const radX = THREE.MathUtils.degToRad(nextConfig.rotX || 0);
+        const radY = THREE.MathUtils.degToRad(nextConfig.rotY || 0);
+        const radZ = THREE.MathUtils.degToRad(nextConfig.rotZ || 0);
         const euler = new THREE.Euler(radX, radY, radZ, 'XYZ');
         nextNormal.set(0, 1, 0).applyEuler(euler).normalize();
       }
-
-      next.normal = nextNormal;
-      nextConfig = next;
-      return next;
-    });
-
-    if (!nextConfig) {
-      const merged = { ...clippingConfig, ...changes };
-      if (merged.axis === 'x') nextNormal.set(1, 0, 0);
-      else if (merged.axis === 'y') nextNormal.set(0, 1, 0);
-      else if (merged.axis === 'z') nextNormal.set(0, 0, 1);
-      else if (merged.axis === 'custom') {
-        const radX = THREE.MathUtils.degToRad(merged.rotX || 0);
-        const radY = THREE.MathUtils.degToRad(merged.rotY || 0);
-        const radZ = THREE.MathUtils.degToRad(merged.rotZ || 0);
-        const euler = new THREE.Euler(radX, radY, radZ, 'XYZ');
-        nextNormal.set(0, 1, 0).applyEuler(euler).normalize();
-      }
-      merged.normal = nextNormal;
-      nextConfig = merged;
     }
+    nextConfig.normal = nextNormal;
 
     let desc = 'Kesit Düzlemi Güncellendi';
     let subType = 'clipping_general';
@@ -373,7 +412,7 @@ export function App() {
       subType = 'clipping_negate';
       isContinuous = false;
     } else if (changes.offset !== undefined) {
-      desc = `Düzlem Konumu: ${changes.offset?.toFixed(1)} mm`;
+      desc = `Düzlem Konumu: ${changes.offset > 0 ? '+' : ''}${changes.offset?.toFixed(1)} mm`;
       subType = 'clipping_offset';
     } else if (changes.rotX !== undefined || changes.rotY !== undefined || changes.rotZ !== undefined) {
       const rx = Math.round(nextConfig.rotX || 0);
@@ -386,8 +425,12 @@ export function App() {
       subType = 'clipping_enabled';
       isContinuous = false;
     } else if (changes.showPlaneHelper !== undefined) {
-      desc = changes.showPlaneHelper ? 'Düzlem Kılavuzu Açıldı' : 'Düzlem Kılavuzu Gizlendi';
+      desc = changes.showPlaneHelper ? 'Düzlem Kılavuzu Açıldı' : 'Gizli Düzlem (İç Geometri İnceleme)';
       subType = 'clipping_helper';
+      isContinuous = false;
+    } else if (changes.highlightInterior !== undefined) {
+      desc = changes.highlightInterior ? 'İç Yüzey Vurgusu: Açık' : 'İç Yüzey Vurgusu: Kapalı';
+      subType = 'clipping_highlight';
       isContinuous = false;
     } else if (changes.addPinOnSlice !== undefined) {
       desc = changes.addPinOnSlice ? 'Kesimde Pim Ekleme: Açık' : 'Kesimde Pim Ekleme: Kapalı';
@@ -395,7 +438,14 @@ export function App() {
       isContinuous = false;
     }
 
-    pushHistory(desc, 'CLIPPING_CONFIG', { clippingConfig: nextConfig }, subType, isContinuous);
+    const cmd = new CutPlaneAdjustCommand({
+      previousConfig: prevConfig,
+      newConfig: nextConfig,
+      description: desc,
+      subType,
+      isContinuous
+    });
+    executeCommand(cmd);
   };
 
   // Sync Three.js Clipping Planes on model material
@@ -413,9 +463,15 @@ export function App() {
       const threePlane = new THREE.Plane(effNormal, -effOffset);
       model.material.clippingPlanes = [threePlane];
       model.material.clipShadows = true;
+      if (clippingConfig.highlightInterior !== false) {
+        model.material.side = THREE.FrontSide;
+      } else {
+        model.material.side = THREE.DoubleSide;
+      }
       model.material.needsUpdate = true;
     } else {
       model.material.clippingPlanes = [];
+      model.material.side = THREE.DoubleSide;
       model.material.needsUpdate = true;
     }
   }, [model, activeMode, clippingConfig, splitResult]);
@@ -439,6 +495,26 @@ export function App() {
       } else if ((e.key === 'h' || e.key === 'H') && (e.ctrlKey || e.metaKey)) {
         e.preventDefault();
         setIsHistoryOpen((prev) => !prev);
+      }
+
+      // Toggle Hidden Plane Helper (P key - inspect internal geometry without visual obstruction)
+      if ((e.key === 'p' || e.key === 'P') && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        if (!e.target.matches('input, textarea, select')) {
+          e.preventDefault();
+          const isCurrentlyHidden = clippingConfig.showPlaneHelper === false;
+          handleClippingConfigChange({ showPlaneHelper: isCurrentlyHidden }, false);
+        }
+      }
+
+      // Toggle Cross-Section HUD Panel (C key)
+      if ((e.key === 'c' || e.key === 'C') && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        if (!e.target.matches('input, textarea, select')) {
+          e.preventDefault();
+          setIsCrossSectionHUDOpen((prev) => !prev);
+          if (!clippingConfig.enabled) {
+            handleClippingConfigChange({ enabled: true }, false);
+          }
+        }
       }
 
       if (e.key === 'm' || e.key === 'M') {
@@ -472,59 +548,104 @@ export function App() {
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
     };
-  }, [history, historyIndex, activeMode, isMeasureActive, clippingConfig]);
+  }, [history, historyIndex, activeMode, isMeasureActive, clippingConfig, isCrossSectionHUDOpen]);
 
   /**
-   * Measurement tool handlers
+   * Measurement tool handlers (MeasureCommand)
    */
   const handleToggleMeasure = () => {
-    setIsMeasureActive((prev) => {
-      const next = !prev;
-      if (next) {
-        setStatusMessage('Ölçüm Aracı Aktif: Model üzerinde 2 noktaya tıklayarak mm cinsinden mesafeyi ölçün.');
-      } else {
-        setStatusMessage('Ölçüm aracı kapatıldı.');
-      }
-      pushHistory(
-        next ? 'Ölçüm Modu Açıldı' : 'Ölçüm Modu Kapatıldı',
-        'MEASURE_TOGGLE',
-        { isMeasureActive: next }
-      );
-      return next;
+    const prevActive = isMeasureActiveRef.current;
+    const next = !prevActive;
+    const cmd = new MeasureCommand({
+      previousMeasure: {
+        pointA: measurePointARef.current,
+        pointB: measurePointBRef.current,
+        isMeasureActive: prevActive
+      },
+      newMeasure: {
+        pointA: measurePointARef.current,
+        pointB: measurePointBRef.current,
+        isMeasureActive: next
+      },
+      description: next ? 'Ölçüm Modu Açıldı' : 'Ölçüm Modu Kapatıldı',
+      subType: 'measure_toggle'
     });
+    executeCommand(cmd);
+    if (next) {
+      setStatusMessage('Ölçüm Aracı Aktif: Model üzerinde 2 noktaya tıklayarak mm cinsinden mesafeyi ölçün.');
+    } else {
+      setStatusMessage('Ölçüm aracı kapatıldı.');
+    }
   };
 
   const handleSetMeasurePointA = (point) => {
-    setMeasurePointA(point);
+    const prevA = measurePointARef.current;
+    const prevB = measurePointBRef.current;
+    const cmd = new MeasureCommand({
+      previousMeasure: {
+        pointA: prevA,
+        pointB: prevB,
+        isMeasureActive: isMeasureActiveRef.current
+      },
+      newMeasure: {
+        pointA: point,
+        pointB: null,
+        isMeasureActive: isMeasureActiveRef.current
+      },
+      description: `Ölçüm: Nokta A Belirlendi (${point.x.toFixed(1)}, ${point.y.toFixed(1)}, ${point.z.toFixed(1)})`,
+      subType: 'measure_point_a'
+    });
+    executeCommand(cmd);
     setStatusMessage('1. Nokta (A) işaretlendi. İkinci noktaya tıklayarak mesafeyi ölçün.');
-    pushHistory(
-      `Ölçüm: Nokta A Belirlendi (${point.x.toFixed(1)}, ${point.y.toFixed(1)}, ${point.z.toFixed(1)})`,
-      'MEASURE_POINT_A',
-      { measurePointA: point, measurePointB: null }
-    );
   };
 
   const handleSetMeasurePointB = (point) => {
-    setMeasurePointB(point);
-    if (measurePointA && point) {
-      const d = measurePointA.distanceTo(point);
+    const prevA = measurePointARef.current;
+    const prevB = measurePointBRef.current;
+    const d = prevA ? prevA.distanceTo(point) : 0;
+    const desc = prevA
+      ? `Ölçüm: ${d.toFixed(2)} mm (Nokta A → B)`
+      : `Ölçüm: Nokta B Belirlendi (${point.x.toFixed(1)}, ${point.y.toFixed(1)}, ${point.z.toFixed(1)})`;
+    const cmd = new MeasureCommand({
+      previousMeasure: {
+        pointA: prevA,
+        pointB: prevB,
+        isMeasureActive: isMeasureActiveRef.current
+      },
+      newMeasure: {
+        pointA: prevA,
+        pointB: point,
+        isMeasureActive: isMeasureActiveRef.current
+      },
+      description: desc,
+      subType: 'measure_point_b'
+    });
+    executeCommand(cmd);
+    if (prevA) {
       setStatusMessage(`Ölçüm Tamamlandı: ${d.toFixed(2)} mm`);
-      pushHistory(
-        `Ölçüm: ${d.toFixed(2)} mm (Nokta A → B)`,
-        'MEASURE_POINT_B',
-        { measurePointB: point }
-      );
     }
   };
 
   const handleClearMeasurement = () => {
-    setMeasurePointA(null);
-    setMeasurePointB(null);
-    setStatusMessage('Ölçüm noktaları temizlendi.');
-    pushHistory('Ölçüm Noktaları Temizlendi', 'MEASURE_CLEAR', {
-      measurePointA: null,
-      measurePointB: null
+    const prevA = measurePointARef.current;
+    const prevB = measurePointBRef.current;
+    if (!prevA && !prevB) return;
+    const cmd = new MeasureCommand({
+      previousMeasure: {
+        pointA: prevA,
+        pointB: prevB,
+        isMeasureActive: isMeasureActiveRef.current
+      },
+      newMeasure: {
+        pointA: null,
+        pointB: null,
+        isMeasureActive: isMeasureActiveRef.current
+      },
+      description: 'Ölçüm Noktaları Temizlendi',
+      subType: 'measure_clear'
     });
+    executeCommand(cmd);
+    setStatusMessage('Ölçüm noktaları temizlendi.');
   };
 
   /**
@@ -806,18 +927,23 @@ export function App() {
       setClippingConfig((prev) => ({ ...prev, offset: 0 }));
       setModelRotation({ x: 0, y: 0, z: 0 });
 
-      // Initialize fresh history for new model
-      const initSnapshot = createWorkspaceSnapshot({
-        description: `${name} Yüklendi`,
-        type: 'MODEL_LOAD',
-        modelRotation: { x: 0, y: 0, z: 0 },
-        splitResult: null,
-        pinConfig,
-        clippingConfig: { ...clippingConfig, offset: 0 },
-        activeMode
+      // Initialize fresh history for new model with InitialModelCommand
+      const initCmd = new InitialModelCommand({
+        modelName: name,
+        initialState: {
+          modelRotation: { x: 0, y: 0, z: 0 },
+          splitResult: null,
+          pinConfig,
+          clippingConfig: { ...clippingConfig, offset: 0 },
+          activeMode
+        }
       });
-      setHistory([initSnapshot]);
-      setHistoryIndex(0);
+      if (commandStackRef.current) {
+        commandStackRef.current.clear(initCmd);
+      } else {
+        setHistory([initCmd.toSnapshot()]);
+        setHistoryIndex(0);
+      }
 
       setStatusMessage(`${name} hazır.`);
     } catch (err) {
@@ -1073,17 +1199,22 @@ export function App() {
         setClippingConfig((prev) => ({ ...prev, offset: 0 }));
         setModelRotation({ x: 0, y: 0, z: 0 });
 
-        const initSnapshot = createWorkspaceSnapshot({
-          description: `${file.name} STL Yüklendi`,
-          type: 'MODEL_LOAD',
-          modelRotation: { x: 0, y: 0, z: 0 },
-          splitResult: null,
-          pinConfig,
-          clippingConfig: { ...clippingConfig, offset: 0 },
-          activeMode
+        const initCmd = new InitialModelCommand({
+          modelName: file.name.replace(/\.stl$/i, ''),
+          initialState: {
+            modelRotation: { x: 0, y: 0, z: 0 },
+            splitResult: null,
+            pinConfig,
+            clippingConfig: { ...clippingConfig, offset: 0 },
+            activeMode
+          }
         });
-        setHistory([initSnapshot]);
-        setHistoryIndex(0);
+        if (commandStackRef.current) {
+          commandStackRef.current.clear(initCmd);
+        } else {
+          setHistory([initCmd.toSnapshot()]);
+          setHistoryIndex(0);
+        }
 
         setStatusMessage(`${file.name} başarıyla yüklendi.`);
       } catch (err) {
@@ -1121,17 +1252,16 @@ export function App() {
           clippingConfig.addPinOnSlice
         );
 
-        setSplitResult(result);
-        setShowPostCutBanner(true);
+        const prevSplit = splitResultRef.current;
+        const cmd = new SplitModelCommand({
+          previousSplitResult: prevSplit,
+          newSplitResult: result,
+          description: `Düzlem Kesimi (${result.cutAreaCm2 || 0} cm²)`,
+          subType: 'split_plane'
+        });
+        executeCommand(cmd);
         setStatusMessage(
           `Model başarıyla 2 parçaya ayrıldı! (Kesit: ${result.cutAreaCm2} cm²)`
-        );
-
-        // Push Cut Operation onto History
-        pushHistory(
-          `Düzlem Kesimi (${result.cutAreaCm2 || 0} cm²)`,
-          'CUT_PLANE',
-          { splitResult: result }
         );
       } catch (err) {
         console.error(err);
@@ -1151,16 +1281,16 @@ export function App() {
     setTimeout(() => {
       try {
         const result = sliceMeshWithLasso(model, drawnPoints, pinConfig);
-        setSplitResult(result);
-        setIsDrawing(false);
-        setShowPostCutBanner(true);
-        setStatusMessage('Model serbest kement eğrisi boyunca başarıyla kesildi!');
-
-        // Push Lasso Split Operation onto History
-        pushHistory('Serbest Kement Kesimi', 'CUT_LASSO', {
-          splitResult: result,
-          isDrawing: false
+        const prevSplit = splitResultRef.current;
+        const cmd = new SplitModelCommand({
+          previousSplitResult: prevSplit,
+          newSplitResult: result,
+          description: 'Serbest Kement Kesimi',
+          subType: 'split_lasso'
         });
+        executeCommand(cmd);
+        setIsDrawing(false);
+        setStatusMessage('Model serbest kement eğrisi boyunca başarıyla kesildi!');
       } catch (err) {
         console.error(err);
         setStatusMessage('Kesim başarısız oldu.');
@@ -1169,10 +1299,16 @@ export function App() {
   };
 
   const handleResetSplit = () => {
-    setSplitResult(null);
-    setShowPostCutBanner(false);
+    const prevSplit = splitResultRef.current;
+    if (!prevSplit) return;
+    const cmd = new SplitModelCommand({
+      previousSplitResult: prevSplit,
+      newSplitResult: null,
+      description: 'Model Yeniden Birleştirildi',
+      subType: 'split_reset'
+    });
+    executeCommand(cmd);
     setStatusMessage('Model orijinal haline getirildi.');
-    pushHistory('Model Yeniden Birleştirildi', 'RESET_SPLIT', { splitResult: null });
   };
 
   /**
@@ -1220,8 +1356,8 @@ export function App() {
   };
 
   const handlePinConfigChange = (changes, isContinuous = false) => {
-    const nextPin = { ...pinConfig, ...changes };
-    setPinConfig(nextPin);
+    const prevPin = pinConfigRef.current;
+    const nextPin = { ...prevPin, ...changes };
 
     let desc = 'Pim/Delik Ayarı Güncellendi';
     let subType = 'pin_general';
@@ -1293,7 +1429,14 @@ export function App() {
       isContinuous = false;
     }
 
-    pushHistory(desc, 'PIN_CONFIG', { pinConfig: nextPin }, subType, isContinuous);
+    const cmd = new PinPlacementCommand({
+      previousConfig: prevPin,
+      newConfig: nextPin,
+      description: desc,
+      subType,
+      isContinuous
+    });
+    executeCommand(cmd);
   };
 
   const resetCamera = () => {
@@ -1304,7 +1447,7 @@ export function App() {
   };
 
   /**
-   * 3D Model Rotation & Alignment Handlers
+   * 3D Model Rotation & Alignment Handlers (ModelTransformCommand)
    */
   const handleModelRotationChange = (newRotation, pushToHist = false) => {
     const norm = {
@@ -1312,50 +1455,93 @@ export function App() {
       y: ((newRotation.y % 360) + 540) % 360 - 180,
       z: ((newRotation.z % 360) + 540) % 360 - 180
     };
-    setModelRotation(norm);
+
+    if (!isDraggingRotationRef.current) {
+      isDraggingRotationRef.current = true;
+      rotationBeforeDragRef.current = modelRotationRef.current;
+    }
 
     if (pushToHist) {
-      const desc = `Model Döndürüldü (X:${Math.round(norm.x)}° Y:${Math.round(norm.y)}° Z:${Math.round(norm.z)}°)`;
-      pushHistory(desc, 'MODEL_ROTATE', { modelRotation: norm });
+      isDraggingRotationRef.current = false;
+      const cmd = new ModelTransformCommand({
+        previousRotation: rotationBeforeDragRef.current,
+        newRotation: norm,
+        description: `Model Döndürüldü (X:${Math.round(norm.x)}° Y:${Math.round(norm.y)}° Z:${Math.round(norm.z)}°)`,
+        subType: 'rotation_drag',
+        isContinuous: false
+      });
+      executeCommand(cmd);
+      rotationBeforeDragRef.current = norm;
+    } else {
+      setModelRotation(norm);
     }
   };
 
   const handleStepRotate = (axis, delta) => {
-    setModelRotation((prev) => {
-      const next = {
-        ...prev,
-        [axis]: (((prev[axis] + delta) % 360) + 540) % 360 - 180
-      };
-      const desc = `${axis.toUpperCase()} Ekseninde ${delta > 0 ? '+' : ''}${delta}° Döndürüldü`;
-      pushHistory(desc, 'MODEL_ROTATE', { modelRotation: next });
-      return next;
+    const prev = modelRotationRef.current;
+    const next = {
+      ...prev,
+      [axis]: (((prev[axis] + delta) % 360) + 540) % 360 - 180
+    };
+    const desc = `${axis.toUpperCase()} Ekseninde ${delta > 0 ? '+' : ''}${delta}° Döndürüldü`;
+    const cmd = new ModelTransformCommand({
+      previousRotation: prev,
+      newRotation: next,
+      description: desc,
+      subType: 'rotation_step',
+      isContinuous: false
     });
+    executeCommand(cmd);
     setStatusMessage(`${axis.toUpperCase()} ekseninde ${delta > 0 ? '+' : ''}${delta}° döndürüldü.`);
   };
 
   const handleResetRotation = () => {
+    const prev = modelRotationRef.current;
     const resetRot = { x: 0, y: 0, z: 0 };
-    setModelRotation(resetRot);
-    pushHistory('Model Yönelimi Sıfırlandı (0°, 0°, 0°)', 'MODEL_ALIGN', { modelRotation: resetRot });
+    const cmd = new ModelTransformCommand({
+      previousRotation: prev,
+      newRotation: resetRot,
+      description: 'Model Yönelimi Sıfırlandı (0°, 0°, 0°)',
+      subType: 'rotation_reset',
+      isContinuous: false
+    });
+    executeCommand(cmd);
     setStatusMessage('Model dönüşü sıfırlandı (0°, 0°, 0°).');
   };
 
   const handleAlignFlat = () => {
-    setModelRotation((prev) => {
-      const snapped = {
-        x: Math.round((prev.x || 0) / 90) * 90,
-        y: Math.round((prev.y || 0) / 90) * 90,
-        z: Math.round((prev.z || 0) / 90) * 90
-      };
-      pushHistory('Model Tablaya Oturtuldu (90° Snap)', 'MODEL_ALIGN', { modelRotation: snapped });
-      return snapped;
+    const prev = modelRotationRef.current;
+    const snapped = {
+      x: Math.round((prev.x || 0) / 90) * 90,
+      y: Math.round((prev.y || 0) / 90) * 90,
+      z: Math.round((prev.z || 0) / 90) * 90
+    };
+    const cmd = new ModelTransformCommand({
+      previousRotation: prev,
+      newRotation: snapped,
+      description: 'Model Tablaya Oturtuldu (90° Snap)',
+      subType: 'rotation_snap',
+      isContinuous: false
     });
+    executeCommand(cmd);
     setStatusMessage('Model en yakın 90° dik açıyla tablaya hizalandı.');
   };
 
   const handleRotationDragEnd = () => {
-    const desc = `Model Döndürüldü (Gizmo: X:${Math.round(modelRotation.x)}° Y:${Math.round(modelRotation.y)}° Z:${Math.round(modelRotation.z)}°)`;
-    pushHistory(desc, 'MODEL_ROTATE', { modelRotation });
+    isDraggingRotationRef.current = false;
+    const prev = rotationBeforeDragRef.current || { x: 0, y: 0, z: 0 };
+    const current = modelRotationRef.current;
+    if (prev.x === current.x && prev.y === current.y && prev.z === current.z) return;
+
+    const cmd = new ModelTransformCommand({
+      previousRotation: prev,
+      newRotation: current,
+      description: `Model Döndürüldü (Gizmo: X:${Math.round(current.x)}° Y:${Math.round(current.y)}° Z:${Math.round(current.z)}°)`,
+      subType: 'rotation_gizmo',
+      isContinuous: false
+    });
+    executeCommand(cmd);
+    rotationBeforeDragRef.current = current;
   };
 
   const handleToggleRotateGizmo = () => {
@@ -1483,6 +1669,10 @@ export function App() {
         autoRotate={autoRotate}
         onToggleAutoRotate={() => setAutoRotate((prev) => !prev)}
         onOpenInspector={() => setIsInspectorOpen(true)}
+        model={model}
+        onOpenVolumeTool={() => setIsVolumeModalOpen(true)}
+        onToggleCrossSectionHUD={() => setIsCrossSectionHUDOpen((prev) => !prev)}
+        isCrossSectionHUDOpen={isCrossSectionHUDOpen}
         isMeasureActive={isMeasureActive}
         onToggleMeasure={handleToggleMeasure}
         measurePointA={measurePointA}
@@ -1721,7 +1911,7 @@ export function App() {
               <Sliders className="w-4 h-4 shrink-0" />
             </div>
             <div>
-              <span className="font-semibold text-white">Canlı Kesit:</span> Kesim eksenini veya offset kaydırıcısını ayarlayarak modeli anında inceleyin; hazır olduğunuzda <strong className="text-white">"Düzlemden Kes"</strong> butonuna basın. (Geri almak için <kbd className="bg-gray-800 border border-gray-700 px-1 py-0.5 rounded text-white font-mono text-[10px]">Ctrl+Z</kbd>)
+              <span className="font-semibold text-white">Canlı Kesit:</span> Kesim eksenini veya offset kaydırıcısını ayarlayarak modeli inceleyin. <kbd className="bg-gray-800 border border-gray-700 px-1 py-0.5 rounded text-white font-mono text-[10px]">P</kbd> ile düzlemi gizleyip iç geometriyi görün, <kbd className="bg-gray-800 border border-gray-700 px-1 py-0.5 rounded text-white font-mono text-[10px]">C</kbd> ile Kesit Panelini açın.
             </div>
           </div>
         )}
@@ -1760,6 +1950,7 @@ export function App() {
           materialTheme={materialTheme}
           showGrid={showGrid}
           showBoundingBox={showBoundingBox}
+          onToggleBoundingBox={() => setShowBoundingBox((prev) => !prev)}
           autoRotate={autoRotate}
           onFileDrop={handleProcessSTLFile}
           isMeasureActive={isMeasureActive}
@@ -1798,6 +1989,9 @@ export function App() {
           }}
           onOpenBatchModal={() => setIsBatchModalOpen(true)}
           batchQueueCount={batchQueue.length}
+          onOpenVolumeTool={() => setIsVolumeModalOpen(true)}
+          isCrossSectionHUDOpen={isCrossSectionHUDOpen}
+          onToggleCrossSectionHUD={() => setIsCrossSectionHUDOpen((prev) => !prev)}
         />
 
         {/* 3D Meshes & Outliner Side Panel */}
@@ -1822,6 +2016,20 @@ export function App() {
         info={modelInfo}
         isOpen={isInspectorOpen}
         onClose={() => setIsInspectorOpen(false)}
+        onOpenVolumeTool={() => setIsVolumeModalOpen(true)}
+        showBoundingBox={showBoundingBox}
+        onToggleBoundingBox={() => setShowBoundingBox((prev) => !prev)}
+      />
+
+      {/* STL Volume & 3D Print Material Calculator Modal */}
+      <VolumeMaterialModal
+        isOpen={isVolumeModalOpen}
+        onClose={() => setIsVolumeModalOpen(false)}
+        model={model}
+        modelInfo={modelInfo}
+        splitResult={splitResult}
+        showBoundingBox={showBoundingBox}
+        onToggleBoundingBox={() => setShowBoundingBox((prev) => !prev)}
       />
 
       {/* Sliced STL Export Modal */}

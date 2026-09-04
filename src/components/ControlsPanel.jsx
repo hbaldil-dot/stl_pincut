@@ -5,6 +5,7 @@ import {
   Upload,
   Sliders,
   Eye,
+  EyeOff,
   PenTool,
   RotateCcw,
   Box,
@@ -34,7 +35,8 @@ import {
   CircleDot,
   Settings2,
   Crosshair,
-  Flame
+  Flame,
+  Scale
 } from 'lucide-react';
 import { SAMPLE_PRESETS } from '../utils/sampleModels';
 import { MATERIAL_THEMES } from '../utils/stlLoaderHelper';
@@ -42,6 +44,7 @@ import { calculateGeometryStats } from '../utils/stlExporter';
 import { OverhangSupportTab } from './OverhangSupportTab';
 import { ExportConfigPanel } from './ExportConfigPanel';
 import { BatchQueueTab } from './BatchQueueTab';
+import { VolumeMaterialTool } from './VolumeMaterialTool';
 
 export function ControlsPanel({
   modelName,
@@ -94,6 +97,12 @@ export function ControlsPanel({
   autoRotate,
   onToggleAutoRotate,
   onOpenInspector,
+  // Volume & Material Estimation props
+  model,
+  onOpenVolumeTool,
+  // Cross-Section & Internal Geometry HUD props
+  onToggleCrossSectionHUD,
+  isCrossSectionHUDOpen = false,
   // Measurement props
   isMeasureActive = false,
   onToggleMeasure,
@@ -194,6 +203,86 @@ export function ControlsPanel({
     setTimeout(() => setIsCopied(false), 2000);
   };
 
+  // Cut plane calculations relative to measured points
+  const currentCutPlane = useMemo(() => {
+    if (!clippingConfig) return null;
+    const norm = clippingConfig.normal
+      ? clippingConfig.normal.clone().normalize()
+      : new THREE.Vector3(0, 1, 0);
+    const effNorm = clippingConfig.negate ? norm.clone().negate() : norm;
+    const effOff = clippingConfig.negate
+      ? -(clippingConfig.offset || 0)
+      : (clippingConfig.offset || 0);
+    return new THREE.Plane(effNorm, -effOff);
+  }, [clippingConfig?.normal, clippingConfig?.offset, clippingConfig?.negate]);
+
+  const projectedDistanceAlongCut = useMemo(() => {
+    if (!measurePointA || !measurePointB || !clippingConfig?.normal) return null;
+    const norm = clippingConfig.normal.clone().normalize();
+    return Math.abs(measurePointB.clone().sub(measurePointA).dot(norm));
+  }, [measurePointA, measurePointB, clippingConfig?.normal]);
+
+  const planeDistA = useMemo(() => {
+    if (!measurePointA || !currentCutPlane) return null;
+    return currentCutPlane.distanceToPoint(measurePointA);
+  }, [measurePointA, currentCutPlane]);
+
+  const planeDistB = useMemo(() => {
+    if (!measurePointB || !currentCutPlane) return null;
+    return currentCutPlane.distanceToPoint(measurePointB);
+  }, [measurePointB, currentCutPlane]);
+
+  const handleSnapPlaneToPoint = (pt) => {
+    if (!pt || !onClippingConfigChange) return;
+    const norm = clippingConfig?.normal
+      ? clippingConfig.normal.clone().normalize()
+      : new THREE.Vector3(0, 1, 0);
+    const targetOffset = norm.dot(pt);
+    onClippingConfigChange(
+      {
+        offset: Math.round(targetOffset * 10) / 10,
+        enabled: true,
+        showPlaneHelper: true
+      },
+      false
+    );
+  };
+
+  const handleSnapPlaneToMidpoint = () => {
+    if (!measurePointA || !measurePointB) return;
+    const mid = measurePointA.clone().add(measurePointB).multiplyScalar(0.5);
+    handleSnapPlaneToPoint(mid);
+  };
+
+  const handleAlignPlaneToAB = () => {
+    if (!measurePointA || !measurePointB || !onClippingConfigChange) return;
+    const dir = measurePointB.clone().sub(measurePointA).normalize();
+    if (dir.length() < 0.001) return;
+
+    const quat = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir);
+    const euler = new THREE.Euler().setFromQuaternion(quat, 'XYZ');
+    const rotX = THREE.MathUtils.radToDeg(euler.x);
+    const rotY = THREE.MathUtils.radToDeg(euler.y);
+    const rotZ = THREE.MathUtils.radToDeg(euler.z);
+
+    const mid = measurePointA.clone().add(measurePointB).multiplyScalar(0.5);
+    const targetOffset = dir.dot(mid);
+
+    onClippingConfigChange(
+      {
+        axis: 'custom',
+        normal: dir,
+        rotX: Math.round(rotX * 10) / 10,
+        rotY: Math.round(rotY * 10) / 10,
+        rotZ: Math.round(rotZ * 10) / 10,
+        offset: Math.round(targetOffset * 10) / 10,
+        enabled: true,
+        showPlaneHelper: true
+      },
+      false
+    );
+  };
+
   return (
     <div className="w-full md:w-96 bg-gray-900/95 backdrop-blur-xl border-r border-gray-800 flex flex-col h-full shadow-2xl z-20 overflow-y-auto">
       {/* 1. Header Bar */}
@@ -274,6 +363,17 @@ export function ControlsPanel({
             <Info className="w-4 h-4" />
           </button>
 
+          {/* Quick Volume & Filament Calculator Button */}
+          {onOpenVolumeTool && (
+            <button
+              onClick={onOpenVolumeTool}
+              className="p-1.5 bg-gray-800 hover:bg-gray-700 text-emerald-300 rounded-lg border border-gray-700 hover:border-emerald-500/50 transition relative"
+              title="STL Hacim ve Malzeme Gereksinimi Hesaplayıcı (cm³ / mm³)"
+            >
+              <Scale className="w-4 h-4" />
+            </button>
+          )}
+
           {/* Quick Batch Queue Button in Header */}
           <button
             onClick={onOpenBatchModal}
@@ -352,6 +452,23 @@ export function ControlsPanel({
           <Ruler className="w-3.5 h-3.5" />
           <span>Ölçüm</span>
           {isMeasureActive && <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-ping" />}
+        </button>
+
+        <button
+          onClick={() => setActiveTab('volume')}
+          className={`py-2 px-3 text-xs font-semibold rounded-t-xl transition flex items-center gap-1.5 shrink-0 ${
+            activeTab === 'volume'
+              ? 'bg-gray-850 text-emerald-400 border-t border-l border-r border-gray-700 border-b-2 border-b-transparent'
+              : 'text-gray-400 hover:text-gray-200'
+          }`}
+        >
+          <Scale className="w-3.5 h-3.5" />
+          <span>Hacim & Filament</span>
+          {modelInfo?.volumeCm3 !== undefined && (
+            <span className="text-[10px] font-mono bg-emerald-500/20 text-emerald-300 px-1.5 py-0.2 rounded-full border border-emerald-500/30">
+              {modelInfo.volumeCm3} cm³
+            </span>
+          )}
         </button>
 
         <button
@@ -726,35 +843,135 @@ export function ControlsPanel({
                     Max
                   </button>
                 </div>
+
+                {/* 3D Ruler Precision Feedback & Positioning Widget in Slice Tab */}
+                {measurePointA && measurePointB ? (
+                  <div className="mt-2.5 p-2.5 rounded-xl bg-cyan-950/30 border border-cyan-800/60 flex flex-col gap-1.5">
+                    <div className="flex items-center justify-between text-[11px] font-semibold text-cyan-300">
+                      <span className="flex items-center gap-1">
+                        <Ruler className="w-3.5 h-3.5 text-cyan-400" />
+                        <span>3D Cetvel Ölçüm Hizalaması</span>
+                      </span>
+                      <span className="font-mono text-[10px] text-cyan-200 font-bold">
+                        {measuredDistance?.toFixed(2)} mm
+                      </span>
+                    </div>
+
+                    <div className="text-[10px] text-gray-400 font-mono flex items-center justify-between">
+                      <span>Eksen Boyunca Mesafe:</span>
+                      <span className="text-white font-bold">{projectedDistanceAlongCut?.toFixed(2)} mm</span>
+                    </div>
+
+                    {planeDistA !== null && planeDistB !== null && (
+                      <div className="grid grid-cols-2 gap-1 text-[9px] font-mono">
+                        <div className="bg-gray-900/80 px-1.5 py-0.5 rounded border border-gray-800 text-gray-300">
+                          A: <span className="text-cyan-400">{planeDistA >= 0 ? '+' : ''}{planeDistA.toFixed(1)} mm</span>
+                        </div>
+                        <div className="bg-gray-900/80 px-1.5 py-0.5 rounded border border-gray-800 text-gray-300">
+                          B: <span className="text-amber-400">{planeDistB >= 0 ? '+' : ''}{planeDistB.toFixed(1)} mm</span>
+                        </div>
+                      </div>
+                    )}
+
+                    <div className="grid grid-cols-3 gap-1 pt-1">
+                      <button
+                        onClick={() => handleSnapPlaneToPoint(measurePointA)}
+                        className="py-1 px-1 rounded text-[10px] font-medium bg-cyan-900/60 hover:bg-cyan-800 text-cyan-200 border border-cyan-700/60 transition text-center"
+                        title="Düzlemi tam Nokta A hizasına ayarlar"
+                      >
+                        Düzlem → A
+                      </button>
+                      <button
+                        onClick={handleSnapPlaneToMidpoint}
+                        className="py-1 px-1 rounded text-[10px] font-bold bg-emerald-900/70 hover:bg-emerald-800 text-emerald-200 border border-emerald-600/70 transition text-center"
+                        title="Düzlemi Nokta A ve B'nin tam ortasına ayarlar"
+                      >
+                        Tam Ortala
+                      </button>
+                      <button
+                        onClick={() => handleSnapPlaneToPoint(measurePointB)}
+                        className="py-1 px-1 rounded text-[10px] font-medium bg-amber-900/60 hover:bg-amber-800 text-amber-200 border border-amber-700/60 transition text-center"
+                        title="Düzlemi tam Nokta B hizasına ayarlar"
+                      >
+                        Düzlem → B
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="mt-2 pt-1 border-t border-gray-800/60">
+                    <button
+                      onClick={() => {
+                        if (!isMeasureActive) onToggleMeasure();
+                        setActiveTab('measure');
+                      }}
+                      className="w-full py-1.5 px-2 rounded-lg text-[11px] font-medium bg-cyan-950/40 hover:bg-cyan-900/50 text-cyan-300 border border-cyan-800/50 transition flex items-center justify-center gap-1.5"
+                    >
+                      <Ruler className="w-3.5 h-3.5 text-cyan-400" />
+                      <span>3D Cetvel ile Yüzeyden Ölç & Düzlemi Konumlandır</span>
+                    </button>
+                  </div>
+                )}
               </div>
 
               {/* Visibility & Behavior Toggles */}
-              <div className="grid grid-cols-2 gap-2 pt-1">
-                <button
-                  onClick={() => onClippingConfigChange({ showPlaneHelper: clippingConfig.showPlaneHelper === false ? true : false }, false)}
-                  className={`py-1.5 px-2 rounded-lg text-[11px] font-medium border transition flex items-center justify-center gap-1.5 ${
-                    clippingConfig.showPlaneHelper !== false
-                      ? 'bg-blue-950/40 border-blue-500/60 text-blue-300'
-                      : 'bg-gray-800/50 border-gray-700 text-gray-400 hover:bg-gray-800'
-                  }`}
-                  title="Kesit düzlemi kılavuz sacını ekranda göster / gizle"
-                >
-                  <Layers className="w-3.5 h-3.5" />
-                  <span>Kılavuz Düzlemi</span>
-                </button>
+              <div className="space-y-2 pt-1">
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    onClick={() => onClippingConfigChange({ showPlaneHelper: clippingConfig.showPlaneHelper === false ? true : false }, false)}
+                    className={`py-2 px-2.5 rounded-xl text-[11px] font-semibold border transition flex items-center justify-center gap-1.5 shadow-sm ${
+                      clippingConfig.showPlaneHelper === false
+                        ? 'bg-amber-950/60 border-amber-500/80 text-amber-300 ring-1 ring-amber-400/30'
+                        : 'bg-blue-950/40 border-blue-500/60 text-blue-300 hover:bg-blue-900/40'
+                    }`}
+                    title={
+                      clippingConfig.showPlaneHelper === false
+                        ? 'Gizli Düzlem Aktif: Kılavuz sacı gizlendi, model iç geometrisi engelsiz inceleniyor. (Kısayol: P)'
+                        : 'Düzlem Görünür: Kılavuz sacını gizleyerek modelin içini engelsiz görmek için tıklayın (Kısayol: P)'
+                    }
+                  >
+                    {clippingConfig.showPlaneHelper === false ? (
+                      <>
+                        <EyeOff className="w-3.5 h-3.5 text-amber-400" />
+                        <span>Gizli Düzlem [P]</span>
+                      </>
+                    ) : (
+                      <>
+                        <Eye className="w-3.5 h-3.5 text-sky-400" />
+                        <span>Düzlem Açık [P]</span>
+                      </>
+                    )}
+                  </button>
 
-                <button
-                  onClick={() => onClippingConfigChange({ addPinOnSlice: clippingConfig.addPinOnSlice === false ? true : false }, false)}
-                  className={`py-1.5 px-2 rounded-lg text-[11px] font-medium border transition flex items-center justify-center gap-1.5 ${
-                    clippingConfig.addPinOnSlice !== false
-                      ? 'bg-orange-950/40 border-orange-500/60 text-orange-300'
-                      : 'bg-gray-800/50 border-gray-700 text-gray-400 hover:bg-gray-800'
-                  }`}
-                  title="Kesim anında seçili pim ve delik geometriyi otomatik uygula"
-                >
-                  <Sparkles className="w-3.5 h-3.5" />
-                  <span>Pimli Kesim</span>
-                </button>
+                  <button
+                    onClick={() => onClippingConfigChange({ addPinOnSlice: clippingConfig.addPinOnSlice === false ? true : false }, false)}
+                    className={`py-2 px-2.5 rounded-xl text-[11px] font-medium border transition flex items-center justify-center gap-1.5 ${
+                      clippingConfig.addPinOnSlice !== false
+                        ? 'bg-orange-950/40 border-orange-500/60 text-orange-300'
+                        : 'bg-gray-800/50 border-gray-700 text-gray-400 hover:bg-gray-800'
+                    }`}
+                    title="Kesim anında seçili pim ve delik geometriyi otomatik uygula"
+                  >
+                    <Sparkles className="w-3.5 h-3.5" />
+                    <span>Pimli Kesim</span>
+                  </button>
+                </div>
+
+                {/* Open Cross-Section View & Cavity Inspection HUD */}
+                {onToggleCrossSectionHUD && (
+                  <button
+                    onClick={onToggleCrossSectionHUD}
+                    className="w-full py-1.5 px-3 bg-sky-950/50 hover:bg-sky-900/60 text-sky-300 border border-sky-700/50 rounded-xl text-[11px] font-semibold transition flex items-center justify-between"
+                    title="Model iç boşluklarını ve et kalınlığını incelemek için hareketli HUD panelini aç (Kısayol: C)"
+                  >
+                    <div className="flex items-center gap-1.5">
+                      <Scissors className="w-3.5 h-3.5 text-sky-400" />
+                      <span>İç Geometri Kesit Paneli (HUD)</span>
+                    </div>
+                    <span className="text-[10px] bg-sky-900/80 px-1.5 py-0.5 rounded font-mono text-sky-200">
+                      {isCrossSectionHUDOpen ? 'Açık' : 'Paneli Aç [C]'}
+                    </span>
+                  </button>
+                )}
               </div>
 
               {/* Action Buttons: Negate & Slice */}
@@ -1664,6 +1881,104 @@ export function ControlsPanel({
             )}
           </div>
 
+          {/* Cut-Plane Positioning & Feedback Card */}
+          <div className="bg-gray-950/50 p-3.5 rounded-xl border border-sky-900/60 flex flex-col gap-3">
+            <div className="flex items-center justify-between">
+              <div className="text-xs font-semibold text-sky-300 flex items-center gap-1.5">
+                <Scissors className="w-3.5 h-3.5 text-sky-400" />
+                <span>Kesit Düzlemi Konumlandırma & Geri Bildirim</span>
+              </div>
+              <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-sky-950/80 text-sky-300 border border-sky-800/60">
+                Eksen: {clippingConfig?.axis?.toUpperCase() || 'Y'}
+              </span>
+            </div>
+
+            {measurePointA && measurePointB ? (
+              <div className="space-y-2.5">
+                {/* Projected distance along cut normal */}
+                {projectedDistanceAlongCut !== null && (
+                  <div className="flex items-center justify-between p-2 rounded-lg bg-gray-900/80 border border-gray-800 text-xs font-mono">
+                    <span className="text-gray-400">Kesit Ekseni Boyunca (Δ{clippingConfig?.axis?.toUpperCase()}):</span>
+                    <span className="text-white font-bold">{projectedDistanceAlongCut.toFixed(2)} mm</span>
+                  </div>
+                )}
+
+                {/* Distance of each point to the cut plane */}
+                {planeDistA !== null && planeDistB !== null && (
+                  <div className="grid grid-cols-2 gap-2 text-xs font-mono">
+                    <div className="p-2 rounded-lg bg-cyan-950/30 border border-cyan-900/40">
+                      <div className="text-[10px] text-cyan-400">Nokta A → Düzlem</div>
+                      <div className="text-sm font-bold text-white mt-0.5">
+                        {planeDistA >= 0 ? '+' : ''}{planeDistA.toFixed(1)} mm
+                      </div>
+                      <div className="text-[9px] text-gray-400">
+                        {planeDistA >= 0 ? 'Düzlemin Üstünde' : 'Düzlemin Altında'}
+                      </div>
+                    </div>
+                    <div className="p-2 rounded-lg bg-amber-950/30 border border-amber-900/40">
+                      <div className="text-[10px] text-amber-400">Nokta B → Düzlem</div>
+                      <div className="text-sm font-bold text-white mt-0.5">
+                        {planeDistB >= 0 ? '+' : ''}{planeDistB.toFixed(1)} mm
+                      </div>
+                      <div className="text-[9px] text-gray-400">
+                        {planeDistB >= 0 ? 'Düzlemin Üstünde' : 'Düzlemin Altında'}
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* Cut Plane Slicing Notice */}
+                {planeDistA !== null && planeDistB !== null && (planeDistA * planeDistB <= 0) && (
+                  <div className="text-[11px] text-rose-300 bg-rose-950/40 border border-rose-900/40 p-2 rounded-lg flex items-center gap-1.5 font-medium">
+                    <span>✂️ Kesit düzlemi şu an Nokta A ile Nokta B arasından kesim yapıyor.</span>
+                  </div>
+                )}
+
+                {/* Direct Positioning Action Buttons */}
+                <div className="pt-2 border-t border-gray-800/80 space-y-1.5">
+                  <div className="text-[10px] text-gray-400 uppercase font-semibold">
+                    Kesit Düzlemini Hızlı Konumlandır:
+                  </div>
+                  <div className="grid grid-cols-3 gap-1.5">
+                    <button
+                      onClick={() => handleSnapPlaneToPoint(measurePointA)}
+                      className="py-1.5 px-2 rounded-lg text-[11px] font-semibold bg-cyan-950 hover:bg-cyan-900 text-cyan-200 border border-cyan-700/60 transition text-center shadow-sm"
+                      title="Kesit düzlemini tam Nokta A hizasına ayarlar"
+                    >
+                      Düzlem → A
+                    </button>
+                    <button
+                      onClick={handleSnapPlaneToMidpoint}
+                      className="py-1.5 px-2 rounded-lg text-[11px] font-bold bg-emerald-950 hover:bg-emerald-900 text-emerald-200 border border-emerald-600/70 transition text-center shadow-sm"
+                      title="Kesit düzlemini Nokta A ve Nokta B'nin tam ortasına ayarlar"
+                    >
+                      Tam Ortala
+                    </button>
+                    <button
+                      onClick={() => handleSnapPlaneToPoint(measurePointB)}
+                      className="py-1.5 px-2 rounded-lg text-[11px] font-semibold bg-amber-950 hover:bg-amber-900 text-amber-200 border border-amber-700/60 transition text-center shadow-sm"
+                      title="Kesit düzlemini tam Nokta B hizasına ayarlar"
+                    >
+                      Düzlem → B
+                    </button>
+                  </div>
+                  <button
+                    onClick={handleAlignPlaneToAB}
+                    className="w-full py-1.5 px-2 rounded-lg text-[11px] font-semibold bg-purple-950/80 hover:bg-purple-900 text-purple-200 border border-purple-700/60 transition flex items-center justify-center gap-1.5 shadow-sm"
+                    title="Kesit düzlemini A→B ölçüm doğrultusuna dik açıya çevirip ortalar"
+                  >
+                    <Compass className="w-3.5 h-3.5 text-purple-400" />
+                    <span>A→B Doğrultusuna Dik Kesit Aç</span>
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="text-[11px] text-gray-400">
+                Model üzerinde iki nokta ölçtüğünüzde, kesit düzleminin bu noktalara göre kesin mesafesi ve tek tıkla hizalama seçenekleri burada görüntülenecektir.
+              </div>
+            )}
+          </div>
+
           {/* Coordinate Points Detail Table */}
           <div className="bg-gray-950/40 p-3.5 rounded-xl border border-gray-800 flex flex-col gap-2.5">
             <div className="text-xs font-semibold text-gray-300 flex items-center gap-1.5">
@@ -1697,26 +2012,54 @@ export function ControlsPanel({
             </div>
           </div>
 
-          {/* Model Bounding Box Reference */}
+          {/* Model Bounding Box Reference & AABB Wireframe Toggle */}
           {modelInfo && (
-            <div className="bg-gray-950/40 p-3.5 rounded-xl border border-gray-800 flex flex-col gap-2">
+            <div className="bg-gray-950/40 p-3.5 rounded-xl border border-gray-800 flex flex-col gap-2.5">
               <div className="text-xs font-semibold text-gray-300 flex items-center justify-between">
-                <span>Model Genel Boyutları</span>
-                <span className="text-[10px] text-gray-500">Bounding Box</span>
+                <div className="flex items-center gap-1.5">
+                  <Box className="w-4 h-4 text-cyan-400" />
+                  <span>Model Genel Boyutları (AABB)</span>
+                </div>
+                {onToggleBoundingBox && (
+                  <button
+                    type="button"
+                    onClick={onToggleBoundingBox}
+                    className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold border transition flex items-center gap-1.5 shadow-sm ${
+                      showBoundingBox
+                        ? 'bg-cyan-600 text-white border-cyan-400 shadow-cyan-900/40'
+                        : 'bg-gray-900 hover:bg-gray-800 text-cyan-300 border-gray-700'
+                    }`}
+                    title="3D Görünümde Modelin Eksen Hizalı Sınır Kutusunu (AABB Tel Kafes) ve Boyut Referanslarını Aç/Kapat"
+                  >
+                    <Box className="w-3 h-3 text-cyan-300" />
+                    <span>{showBoundingBox ? 'Tel Kafes: Açık' : 'Tel Kafesi Göster'}</span>
+                    <span
+                      className={`w-1.5 h-1.5 rounded-full ${
+                        showBoundingBox ? 'bg-cyan-300 animate-pulse' : 'bg-gray-600'
+                      }`}
+                    />
+                  </button>
+                )}
               </div>
               <div className="grid grid-cols-3 gap-2 text-center text-xs font-mono text-gray-300">
                 <div className="bg-gray-900 p-1.5 rounded border border-gray-800">
                   <span className="text-gray-500 text-[10px]">X (Genişlik):</span>
-                  <div className="font-bold text-cyan-300">{modelInfo.dimensions.x} mm</div>
+                  <div className="font-bold text-red-400">{modelInfo.dimensions.x} mm</div>
                 </div>
                 <div className="bg-gray-900 p-1.5 rounded border border-gray-800">
                   <span className="text-gray-500 text-[10px]">Y (Yükseklik):</span>
-                  <div className="font-bold text-emerald-300">{modelInfo.dimensions.y} mm</div>
+                  <div className="font-bold text-green-400">{modelInfo.dimensions.y} mm</div>
                 </div>
                 <div className="bg-gray-900 p-1.5 rounded border border-gray-800">
                   <span className="text-gray-500 text-[10px]">Z (Derinlik):</span>
-                  <div className="font-bold text-purple-300">{modelInfo.dimensions.z} mm</div>
+                  <div className="font-bold text-blue-400">{modelInfo.dimensions.z} mm</div>
                 </div>
+              </div>
+              <div className="text-[10px] text-gray-400 flex items-center justify-between">
+                <span>Ölçümler ve tabla yerleşimi için 3D uzaysal tel kafes referansı.</span>
+                <span className="font-mono text-cyan-400 font-bold">
+                  {showBoundingBox ? '3D Görünür' : 'Gizli'}
+                </span>
               </div>
             </div>
           )}
@@ -1786,6 +2129,17 @@ export function ControlsPanel({
               </button>
             ))}
           </div>
+        </div>
+      )}
+
+      {/* Tab: Volume & 3D Print Material Requirements */}
+      {activeTab === 'volume' && (
+        <div className="p-4 flex flex-col gap-3.5">
+          <VolumeMaterialTool
+            model={model}
+            modelInfo={modelInfo}
+            splitResult={splitResult}
+          />
         </div>
       )}
 

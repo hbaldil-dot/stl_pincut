@@ -38,29 +38,59 @@ export function HistoryPanel({
       case 'CUT_PLANE':
       case 'CUT_LASSO':
       case 'RESET_SPLIT':
+      case 'SPLIT_MODEL':
         return <Scissors className="w-3.5 h-3.5 text-blue-400" />;
       case 'PIN_CONFIG':
       case 'PIN_PLACEMENT':
         return <Sparkles className="w-3.5 h-3.5 text-orange-400" />;
+      case 'MEASURE':
       case 'MEASURE_POINT_A':
       case 'MEASURE_POINT_B':
       case 'MEASURE_CLEAR':
       case 'MEASURE_TOGGLE':
         return <Ruler className="w-3.5 h-3.5 text-cyan-400" />;
+      case 'LASSO':
       case 'LASSO_DRAW':
       case 'LASSO_CLOSE':
       case 'LASSO_CLEAR':
       case 'LASSO_UNDO':
         return <PenTool className="w-3.5 h-3.5 text-emerald-400" />;
+      case 'MODEL_TRANSFORM':
       case 'MODEL_ROTATE':
       case 'MODEL_ALIGN':
         return <RotateCw className="w-3.5 h-3.5 text-amber-400" />;
+      case 'CUT_PLANE_ADJUST':
       case 'CLIPPING_CONFIG':
         return <Sliders className="w-3.5 h-3.5 text-purple-400" />;
       case 'MODEL_LOAD':
         return <Layers className="w-3.5 h-3.5 text-emerald-300" />;
       default:
         return <History className="w-3.5 h-3.5 text-gray-400" />;
+    }
+  };
+
+  const getActionBadge = (type) => {
+    switch (type) {
+      case 'MODEL_TRANSFORM':
+      case 'MODEL_ROTATE':
+      case 'MODEL_ALIGN':
+        return { label: 'Model', color: 'bg-amber-950/80 text-amber-300 border-amber-800/50' };
+      case 'CUT_PLANE_ADJUST':
+      case 'CLIPPING_CONFIG':
+        return { label: 'Düzlem', color: 'bg-purple-950/80 text-purple-300 border-purple-800/50' };
+      case 'PIN_PLACEMENT':
+      case 'PIN_CONFIG':
+        return { label: 'Pim', color: 'bg-orange-950/80 text-orange-300 border-orange-800/50' };
+      case 'SPLIT_MODEL':
+      case 'CUT_PLANE':
+      case 'CUT_LASSO':
+        return { label: 'Kesim', color: 'bg-blue-950/80 text-blue-300 border-blue-800/50' };
+      case 'MEASURE':
+      case 'MEASURE_POINT_A':
+      case 'MEASURE_POINT_B':
+        return { label: 'Ölçüm', color: 'bg-cyan-950/80 text-cyan-300 border-cyan-800/50' };
+      default:
+        return null;
     }
   };
 
@@ -182,8 +212,13 @@ export function HistoryPanel({
                   </div>
 
                   <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-1.5">
+                    <div className="flex items-center gap-1.5 flex-wrap">
                       <span className="text-[10px] font-mono text-gray-500">#{index + 1}</span>
+                      {getActionBadge(item.type) && (
+                        <span className={`text-[9px] px-1.5 py-0.2 rounded border font-mono font-medium ${getActionBadge(item.type).color}`}>
+                          {getActionBadge(item.type).label}
+                        </span>
+                      )}
                       <span
                         className={`text-xs font-semibold truncate ${
                           isCurrent
@@ -197,7 +232,19 @@ export function HistoryPanel({
                       </span>
                     </div>
 
-                    <div className="flex items-center gap-2 mt-0.5 text-[10px] text-gray-500 font-mono">
+                    {item.diffSummary && (
+                      <div className="mt-1">
+                        <span className={`inline-block text-[9px] font-mono px-1.5 py-0.5 rounded border ${
+                          isCurrent
+                            ? 'bg-blue-900/40 text-blue-200 border-blue-700/50'
+                            : 'bg-gray-800/80 text-gray-400 border-gray-700/60'
+                        }`}>
+                          {item.diffSummary}
+                        </span>
+                      </div>
+                    )}
+
+                    <div className="flex items-center gap-2 mt-1 text-[10px] text-gray-500 font-mono">
                       <span className="flex items-center gap-1">
                         <Clock className="w-2.5 h-2.5" />
                         {formatTime(item.timestamp)}
