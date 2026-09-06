@@ -158,6 +158,87 @@ export class ModelTransformCommand extends BaseCommand {
 }
 
 /**
+ * Command representing a 3D Model Scaling transformation.
+ * Supports uniform and non-uniform axis scaling with single-click reset.
+ */
+export class ModelScaleCommand extends BaseCommand {
+  constructor({
+    previousScale,
+    newScale,
+    description = null,
+    subType = 'scale_general',
+    isContinuous = false
+  }) {
+    const sx = parseFloat((newScale?.x ?? 1).toFixed(3));
+    const sy = parseFloat((newScale?.y ?? 1).toFixed(3));
+    const sz = parseFloat((newScale?.z ?? 1).toFixed(3));
+
+    const isUniform = Math.abs(sx - sy) < 1e-4 && Math.abs(sy - sz) < 1e-4;
+    const desc =
+      description ||
+      (subType === 'scale_reset'
+        ? 'Model Ölçeği Sıfırlandı (%100 / 1.0x)'
+        : isUniform
+        ? `Model Ölçeklendi (%${Math.round(sx * 100)})`
+        : `Model Ölçeklendi (X:%${Math.round(sx * 100)} Y:%${Math.round(sy * 100)} Z:%${Math.round(sz * 100)})`);
+
+    super({
+      name: 'Model Ölçekleme',
+      description: desc,
+      type: 'MODEL_SCALE',
+      subType,
+      isContinuous
+    });
+
+    this.previousScale = {
+      x: previousScale?.x ?? 1,
+      y: previousScale?.y ?? 1,
+      z: previousScale?.z ?? 1
+    };
+    this.newScale = {
+      x: sx,
+      y: sy,
+      z: sz
+    };
+  }
+
+  execute(context) {
+    if (context.setModelScale) {
+      context.setModelScale(this.newScale);
+    }
+  }
+
+  undo(context) {
+    if (context.setModelScale) {
+      context.setModelScale(this.previousScale);
+    }
+  }
+
+  canMergeWith(other) {
+    if (!(other instanceof ModelScaleCommand)) return false;
+    if (this.subType !== other.subType) return false;
+    const isSlider = this.isContinuous || other.isContinuous;
+    return isSlider && other.timestamp - this.timestamp < 1000;
+  }
+
+  merge(other) {
+    this.newScale = { ...other.newScale };
+    this.description = other.description;
+    this.timestamp = other.timestamp;
+  }
+
+  getDiffSummary() {
+    const px = Math.round((this.previousScale.x || 1) * 100);
+    const py = Math.round((this.previousScale.y || 1) * 100);
+    const pz = Math.round((this.previousScale.z || 1) * 100);
+    const nx = Math.round((this.newScale.x || 1) * 100);
+    const ny = Math.round((this.newScale.y || 1) * 100);
+    const nz = Math.round((this.newScale.z || 1) * 100);
+    return `[%${px}, %${py}, %${pz}] → [%${nx}, %${ny}, %${nz}]`;
+  }
+}
+
+/**
  * Helper to deep clone a clipping plane configuration
  */
 function cloneClippingConfig(cfg) {
@@ -535,6 +616,7 @@ export class InitialModelCommand extends BaseCommand {
   undo(context) {
     if (!this.initialState) return;
     if (context.setModelRotation) context.setModelRotation(this.initialState.modelRotation || { x: 0, y: 0, z: 0 });
+    if (context.setModelScale) context.setModelScale(this.initialState.modelScale || { x: 1, y: 1, z: 1 });
     if (context.setClippingConfig) context.setClippingConfig(this.initialState.clippingConfig);
     if (context.setPinConfig) context.setPinConfig(this.initialState.pinConfig || {});
     if (context.setSplitResult) context.setSplitResult(null);

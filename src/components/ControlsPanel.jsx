@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import {
   Scissors,
   Download,
@@ -39,11 +39,24 @@ import {
   Scale,
   Cpu,
   Gauge,
-  Activity
+  Activity,
+  Lock,
+  Unlock,
+  Link,
+  Unlink,
+  Percent,
+  Edit3
 } from 'lucide-react';
 import { SAMPLE_PRESETS } from '../utils/sampleModels';
 import { MATERIAL_THEMES } from '../utils/stlLoaderHelper';
 import { calculateGeometryStats } from '../utils/stlExporter';
+import {
+  calculateGeometryVolume,
+  calculateModelMass,
+  COMMON_DENSITY_PRESETS,
+  OTHER_DENSITY_PRESETS,
+  ALL_DENSITY_PRESETS
+} from '../utils/volumeCalculator';
 import { OverhangSupportTab } from './OverhangSupportTab';
 import { ExportConfigPanel } from './ExportConfigPanel';
 import { BatchQueueTab } from './BatchQueueTab';
@@ -123,6 +136,15 @@ export function ControlsPanel({
   onToggleRotateGizmo,
   snapAngle = null,
   onSetSnapAngle,
+  // Model Scale props
+  modelScale = { x: 1, y: 1, z: 1 },
+  onModelScaleChange,
+  onResetScale,
+  isUniformScale = true,
+  onToggleUniformScale,
+  // Material Density & Mass props
+  materialDensity = 1.24,
+  onMaterialDensityChange,
   // History / Undo / Redo props
   canUndo = false,
   canRedo = false,
@@ -162,6 +184,184 @@ export function ControlsPanel({
   const activeTab = currentTab || internalActiveTab;
   const setActiveTab = onSelectTab || setInternalActiveTab;
   const [isCopied, setIsCopied] = useState(false);
+  const [transformMode, setTransformMode] = useState('scale'); // 'scale' | 'rotate'
+  const [internalMaterialDensity, setInternalMaterialDensity] = useState(1.24);
+
+  const effectiveDensity =
+    typeof materialDensity === 'number'
+      ? materialDensity
+      : parseFloat(materialDensity) || internalMaterialDensity;
+
+  const [densityInputText, setDensityInputText] = useState(effectiveDensity.toString());
+
+  useEffect(() => {
+    const parsed = parseFloat(densityInputText);
+    if (isNaN(parsed) || Math.abs(parsed - effectiveDensity) > 0.0001) {
+      setDensityInputText(effectiveDensity.toString());
+    }
+  }, [effectiveDensity]);
+
+  const handleDensityInputChange = (val) => {
+    setDensityInputText(val);
+    const num = parseFloat(val);
+    if (!isNaN(num) && num > 0) {
+      setInternalMaterialDensity(num);
+      if (onMaterialDensityChange) {
+        onMaterialDensityChange(num);
+      }
+    }
+  };
+
+  const handleDensitySelect = (val) => {
+    const num = parseFloat(val);
+    if (!isNaN(num) && num > 0) {
+      setDensityInputText(num.toString());
+      setInternalMaterialDensity(num);
+      if (onMaterialDensityChange) {
+        onMaterialDensityChange(num);
+      }
+    }
+  };
+
+  const matchedPreset = ALL_DENSITY_PRESETS.find(
+    (p) => Math.abs(effectiveDensity - p.density) < 0.005
+  );
+  const isCustomDensity = !matchedPreset;
+
+  // Real-time calculation of scaled volume, surface area, mass and dimensions
+  const liveScaledStats = useMemo(() => {
+    const sx = modelScale?.x ?? 1;
+    const sy = modelScale?.y ?? 1;
+    const sz = modelScale?.z ?? 1;
+
+    let volumeCm3 = 0;
+    let volumeMm3 = 0;
+    let surfaceAreaCm2 = 0;
+    let surfaceAreaMm2 = 0;
+
+    if (model?.geometry) {
+      try {
+        const stats = calculateGeometryVolume(model.geometry, { x: sx, y: sy, z: sz });
+        volumeCm3 = stats.volumeCm3;
+        volumeMm3 = stats.volumeMm3;
+        surfaceAreaCm2 = stats.surfaceAreaCm2;
+        surfaceAreaMm2 = stats.surfaceAreaMm2;
+      } catch (e) {
+        const baseV = modelInfo?.volumeCm3 || 0;
+        const baseA = modelInfo?.surfaceAreaCm2 || 0;
+        volumeCm3 = parseFloat((baseV * sx * sy * sz).toFixed(2));
+        volumeMm3 = Math.round(volumeCm3 * 1000);
+        const areaFactor = Math.abs(sx - sy) < 1e-4 && Math.abs(sy - sz) < 1e-4
+          ? sx * sx
+          : Math.sqrt(sx * sy) * Math.sqrt(sy * sz);
+        surfaceAreaCm2 = parseFloat((baseA * areaFactor).toFixed(2));
+        surfaceAreaMm2 = Math.round(surfaceAreaCm2 * 100);
+      }
+    } else {
+      const baseV = modelInfo?.volumeCm3 || 0;
+      const baseA = modelInfo?.surfaceAreaCm2 || 0;
+      volumeCm3 = parseFloat((baseV * sx * sy * sz).toFixed(2));
+      volumeMm3 = Math.round(volumeCm3 * 1000);
+      const areaFactor = Math.abs(sx - sy) < 1e-4 && Math.abs(sy - sz) < 1e-4
+        ? sx * sx
+        : Math.sqrt(sx * sy) * Math.sqrt(sy * sz);
+      surfaceAreaCm2 = parseFloat((baseA * areaFactor).toFixed(2));
+      surfaceAreaMm2 = Math.round(surfaceAreaCm2 * 100);
+    }
+
+    const massStats = calculateModelMass(volumeCm3, effectiveDensity);
+
+    const origX = modelInfo?.dimensions?.x || 0;
+    const origY = modelInfo?.dimensions?.y || 0;
+    const origZ = modelInfo?.dimensions?.z || 0;
+
+    return {
+      volumeCm3,
+      volumeMm3,
+      surfaceAreaCm2,
+      surfaceAreaMm2,
+      massGrams: massStats.massGrams,
+      massKg: massStats.massKg,
+      formattedMassGrams: massStats.formattedGrams,
+      formattedMassKg: massStats.formattedKg,
+      effectiveDensity,
+      dimX: parseFloat((origX * sx).toFixed(2)),
+      dimY: parseFloat((origY * sy).toFixed(2)),
+      dimZ: parseFloat((origZ * sz).toFixed(2)),
+      origDimX: origX,
+      origDimY: origY,
+      origDimZ: origZ,
+      origVolumeCm3: modelInfo?.volumeCm3 || 0,
+      origSurfaceAreaCm2: modelInfo?.surfaceAreaCm2 || 0,
+      volumeRatio: (modelInfo?.volumeCm3 || 0) > 0 ? volumeCm3 / modelInfo.volumeCm3 : sx * sy * sz,
+      areaRatio: (modelInfo?.surfaceAreaCm2 || 0) > 0 ? surfaceAreaCm2 / modelInfo.surfaceAreaCm2 : sx * sx
+    };
+  }, [model?.geometry, modelScale, modelInfo, effectiveDensity]);
+
+  const isScaled =
+    Math.abs((modelScale?.x ?? 1) - 1) > 1e-3 ||
+    Math.abs((modelScale?.y ?? 1) - 1) > 1e-3 ||
+    Math.abs((modelScale?.z ?? 1) - 1) > 1e-3;
+
+  // Scale change handlers
+  const handleSetUniformScale = (val, pushToHist = true) => {
+    const factor = Math.max(0.01, Math.min(50, val));
+    if (onModelScaleChange) {
+      onModelScaleChange({ x: factor, y: factor, z: factor }, pushToHist);
+    }
+  };
+
+  const handleSetAxisScale = (axis, val, pushToHist = true) => {
+    const factor = Math.max(0.01, Math.min(50, val));
+    if (!onModelScaleChange) return;
+
+    if (isUniformScale) {
+      onModelScaleChange({ x: factor, y: factor, z: factor }, pushToHist);
+    } else {
+      const next = {
+        x: axis === 'x' ? factor : (modelScale?.x ?? 1),
+        y: axis === 'y' ? factor : (modelScale?.y ?? 1),
+        z: axis === 'z' ? factor : (modelScale?.z ?? 1)
+      };
+      onModelScaleChange(next, pushToHist);
+    }
+  };
+
+  const handleSetAxisDimension = (axis, targetDim, pushToHist = true) => {
+    const origDim =
+      axis === 'x'
+        ? (liveScaledStats.origDimX || 1)
+        : axis === 'y'
+        ? (liveScaledStats.origDimY || 1)
+        : (liveScaledStats.origDimZ || 1);
+
+    if (origDim <= 0) return;
+    const factor = Math.max(0.01, Math.min(50, targetDim / origDim));
+
+    if (isUniformScale) {
+      onModelScaleChange({ x: factor, y: factor, z: factor }, pushToHist);
+    } else {
+      const next = {
+        x: axis === 'x' ? factor : (modelScale?.x ?? 1),
+        y: axis === 'y' ? factor : (modelScale?.y ?? 1),
+        z: axis === 'z' ? factor : (modelScale?.z ?? 1)
+      };
+      onModelScaleChange(next, pushToHist);
+    }
+  };
+
+  const handleFitToBed = (bedSize = 200) => {
+    const maxDim = Math.max(
+      liveScaledStats.origDimX || 1,
+      liveScaledStats.origDimY || 1,
+      liveScaledStats.origDimZ || 1
+    );
+    if (maxDim <= 0) return;
+    const factor = bedSize / maxDim;
+    if (onModelScaleChange) {
+      onModelScaleChange({ x: factor, y: factor, z: factor }, true);
+    }
+  };
 
   // Dynamic range for offset slider based on model bounding radius
   const maxRadius = Math.ceil(modelInfo?.boundingSphereRadius || 35);
@@ -427,9 +627,14 @@ export function ControlsPanel({
               : 'text-gray-400 hover:text-gray-200'
           }`}
         >
-          <RotateCw className="w-3.5 h-3.5" />
-          <span>Döndür & Hizala</span>
-          {isRotateGizmoActive && <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-ping" />}
+          <Maximize2 className="w-3.5 h-3.5" />
+          <span>Ölçek & Döndür</span>
+          {(isRotateGizmoActive ||
+            Math.abs((modelScale?.x ?? 1) - 1) > 1e-3 ||
+            Math.abs((modelScale?.y ?? 1) - 1) > 1e-3 ||
+            Math.abs((modelScale?.z ?? 1) - 1) > 1e-3) && (
+            <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-ping" />
+          )}
         </button>
 
         <button
@@ -536,6 +741,26 @@ export function ControlsPanel({
                     <span className="text-cyan-400 font-semibold" title="Model Tepe Noktası (Vertex) Sayısı">
                       {modelInfo.vertexCount.toLocaleString()} vertex
                     </span>
+                  </>
+                )}
+                {(Math.abs((modelScale?.x ?? 1) - 1) > 1e-3 ||
+                  Math.abs((modelScale?.y ?? 1) - 1) > 1e-3 ||
+                  Math.abs((modelScale?.z ?? 1) - 1) > 1e-3) && (
+                  <>
+                    <span className="text-gray-600">•</span>
+                    <span className="text-amber-400 font-semibold" title="Model Ölçeği">
+                      %{Math.round((modelScale?.x ?? 1) * 100)}
+                    </span>
+                    {onResetScale && (
+                      <button
+                        onClick={onResetScale}
+                        className="px-1.5 py-0.5 bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 border border-amber-500/40 rounded text-[10px] font-semibold flex items-center gap-1 transition"
+                        title="Orijinal %100 ölçeğe sıfırla"
+                      >
+                        <RotateCcw className="w-2.5 h-2.5" />
+                        Sıfırla
+                      </button>
+                    )}
                   </>
                 )}
               </div>
@@ -1516,9 +1741,650 @@ export function ControlsPanel({
         </div>
       )}
 
-      {/* Tab: Model Rotation & Alignment */}
+      {/* Tab: Model Scale, Rotation & Alignment */}
       {activeTab === 'rotate' && (
         <div className="p-4 flex flex-col gap-4">
+          {/* Sub-mode Switch: Scale vs Rotate */}
+          <div className="flex bg-gray-950 p-1 rounded-xl border border-gray-800 shadow-inner">
+            <button
+              onClick={() => setTransformMode('scale')}
+              className={`flex-1 py-1.5 px-3 rounded-lg font-bold text-xs flex items-center justify-center gap-1.5 transition ${
+                transformMode === 'scale'
+                  ? 'bg-amber-500 text-gray-950 shadow-md shadow-amber-950/40'
+                  : 'text-gray-400 hover:text-gray-200'
+              }`}
+            >
+              <Maximize2 className="w-3.5 h-3.5" />
+              <span>Model Ölçekleme</span>
+              {isScaled && (
+                <span className="text-[10px] bg-gray-900/80 text-amber-300 px-1.5 py-0.2 rounded font-mono font-bold">
+                  %{Math.round((modelScale?.x ?? 1) * 100)}
+                </span>
+              )}
+            </button>
+            <button
+              onClick={() => setTransformMode('rotate')}
+              className={`flex-1 py-1.5 px-3 rounded-lg font-bold text-xs flex items-center justify-center gap-1.5 transition ${
+                transformMode === 'rotate'
+                  ? 'bg-amber-500 text-gray-950 shadow-md shadow-amber-950/40'
+                  : 'text-gray-400 hover:text-gray-200'
+              }`}
+            >
+              <RotateCw className="w-3.5 h-3.5" />
+              <span>Döndürme & Hizalama</span>
+            </button>
+          </div>
+
+          {/* Sub-view: Model Rescaling & Dimensioning */}
+          {transformMode === 'scale' && (
+            <div className="flex flex-col gap-4">
+              {/* Header Description & Reset Button */}
+              <div className="bg-gradient-to-br from-amber-950/40 via-gray-900 to-gray-950 p-3.5 rounded-xl border border-amber-500/30 flex flex-col gap-3">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2 text-xs font-bold text-amber-300">
+                    <Maximize2 className="w-4 h-4 text-amber-400" />
+                    <span>Model Ölçekleme & Yeniden Boyutlandırma</span>
+                  </div>
+                  {onResetScale && (
+                    <button
+                      onClick={onResetScale}
+                      disabled={!isScaled}
+                      className={`text-[11px] px-2.5 py-1 rounded-lg border font-semibold flex items-center gap-1.5 transition shadow-sm ${
+                        isScaled
+                          ? 'bg-amber-500/20 text-amber-200 border-amber-500/40 hover:bg-amber-500/30 ring-1 ring-amber-400/30 cursor-pointer'
+                          : 'bg-gray-850 text-gray-500 border-gray-700/60 cursor-not-allowed opacity-60'
+                      }`}
+                      title="Modeli orijinal 1.0 (%100) boyutuna sıfırla"
+                    >
+                      <RotateCcw className="w-3 h-3" />
+                      <span>Ölçeği Sıfırla (%100)</span>
+                    </button>
+                  )}
+                </div>
+                <p className="text-[11px] text-gray-300 leading-relaxed">
+                  Modeli orantılı veya eksen bazında serbestçe yeniden boyutlandırın. Hacim, kütle ve yüzey alanı anlık olarak güncellenir.
+                </p>
+
+                {/* Uniform vs Independent Axis Switch */}
+                <div className="flex items-center justify-between bg-gray-950/60 p-2.5 rounded-lg border border-gray-800">
+                  <div className="flex items-center gap-2.5">
+                    <div
+                      className={`p-1.5 rounded-lg border ${
+                        isUniformScale
+                          ? 'bg-amber-500/20 border-amber-500/50 text-amber-300'
+                          : 'bg-blue-500/20 border-blue-500/50 text-blue-300'
+                      }`}
+                    >
+                      {isUniformScale ? <Lock className="w-4 h-4" /> : <Unlock className="w-4 h-4" />}
+                    </div>
+                    <div>
+                      <div className="text-xs font-bold text-gray-200">
+                        {isUniformScale ? 'Orantılı Ölçek (XYZ Kilitli)' : 'Serbest Eksen (XYZ Bağımsız)'}
+                      </div>
+                      <div className="text-[10px] text-gray-400">
+                        {isUniformScale
+                          ? 'Bir eksen değiştiğinde tüm boyutlar orantılı güncellenir'
+                          : 'X, Y ve Z eksenleri birbirinden bağımsız ölçeklenir'}
+                      </div>
+                    </div>
+                  </div>
+                  {onToggleUniformScale && (
+                    <button
+                      onClick={onToggleUniformScale}
+                      className={`px-2.5 py-1 rounded-lg text-xs font-semibold border transition flex items-center gap-1 ${
+                        isUniformScale
+                          ? 'bg-amber-500 text-gray-950 border-amber-400 font-bold hover:bg-amber-400'
+                          : 'bg-gray-800 text-blue-300 border-blue-500/40 hover:bg-gray-700'
+                      }`}
+                    >
+                      {isUniformScale ? (
+                        <>
+                          <Lock className="w-3 h-3" />
+                          <span>Kilitli</span>
+                        </>
+                      ) : (
+                        <>
+                          <Unlock className="w-3 h-3" />
+                          <span>Serbest</span>
+                        </>
+                      )}
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {/* Master Scale Slider & Inputs (Uniform Mode) */}
+              {isUniformScale && (
+                <div className="bg-gray-950/60 p-3.5 rounded-xl border border-gray-800 flex flex-col gap-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-gray-200 flex items-center gap-1.5">
+                      <Percent className="w-3.5 h-3.5 text-amber-400" />
+                      Ana Ölçek Katsayısı (% Oran)
+                    </span>
+                    <div className="flex items-center gap-1.5">
+                      <div className="flex items-center bg-gray-900 border border-gray-700 rounded-lg px-2 py-0.5 font-mono text-xs text-amber-300">
+                        <input
+                          type="number"
+                          step="1"
+                          min="1"
+                          max="1000"
+                          value={Math.round((modelScale?.x ?? 1) * 100)}
+                          onChange={(e) => {
+                            const val = parseFloat(e.target.value);
+                            if (!isNaN(val) && val > 0) handleSetUniformScale(val / 100, true);
+                          }}
+                          className="w-12 bg-transparent text-right outline-none text-amber-300 font-bold"
+                        />
+                        <span className="text-gray-500 text-[11px] ml-0.5">%</span>
+                      </div>
+                      <span className="text-[11px] text-gray-500 font-mono">
+                        ({(modelScale?.x ?? 1).toFixed(2)}x)
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Range Slider */}
+                  <input
+                    type="range"
+                    min="10"
+                    max="300"
+                    step="1"
+                    value={Math.round((modelScale?.x ?? 1) * 100)}
+                    onChange={(e) => handleSetUniformScale(parseFloat(e.target.value) / 100, false)}
+                    onMouseUp={(e) => handleSetUniformScale(parseFloat(e.target.value) / 100, true)}
+                    onTouchEnd={(e) => handleSetUniformScale(parseFloat(e.target.value) / 100, true)}
+                    className="w-full accent-amber-500 cursor-pointer h-1.5 bg-gray-800 rounded-lg"
+                  />
+
+                  {/* Steppers */}
+                  <div className="grid grid-cols-6 gap-1">
+                    {[-50, -10, -1, 1, 10, 50].map((delta) => (
+                      <button
+                        key={delta}
+                        onClick={() => {
+                          const currentPct = Math.round((modelScale?.x ?? 1) * 100);
+                          const nextPct = Math.max(1, currentPct + delta);
+                          handleSetUniformScale(nextPct / 100, true);
+                        }}
+                        className="py-1 px-1 bg-gray-900 hover:bg-gray-850 border border-gray-800 hover:border-amber-500/40 rounded text-[10px] font-mono text-gray-300 hover:text-amber-200 transition"
+                      >
+                        {delta > 0 ? `+${delta}%` : `${delta}%`}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Per-Axis Scaling Cards (X, Y, Z) */}
+              <div className="bg-gray-950/60 p-3.5 rounded-xl border border-gray-800 flex flex-col gap-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-bold text-gray-200 flex items-center gap-1.5">
+                    <Scale className="w-3.5 h-3.5 text-amber-400" />
+                    Eksen Bazında Boyut & Ölçek (X, Y, Z)
+                  </span>
+                  <span className="text-[10px] text-gray-400">
+                    {isUniformScale ? 'Orantılı Bağlı' : 'Bağımsız'}
+                  </span>
+                </div>
+
+                {/* X Axis Card */}
+                <div className="bg-gray-900/80 p-2.5 rounded-lg border border-red-900/40 flex flex-col gap-2">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-1.5">
+                      <span className="px-1.5 py-0.5 rounded bg-red-500/20 text-red-300 font-mono font-bold text-[10px] border border-red-500/40">
+                        X
+                      </span>
+                      <span className="text-xs font-semibold text-gray-200">Genişlik (X):</span>
+                      <span className="text-[10px] text-gray-500 font-mono">
+                        (Orij: {liveScaledStats.origDimX} mm)
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <div className="flex items-center bg-gray-950 border border-gray-700 rounded px-1.5 py-0.5 font-mono text-xs">
+                        <input
+                          type="number"
+                          step="0.5"
+                          min="0.1"
+                          value={liveScaledStats.dimX}
+                          onChange={(e) => {
+                            const val = parseFloat(e.target.value);
+                            if (!isNaN(val) && val > 0) handleSetAxisDimension('x', val, true);
+                          }}
+                          className="w-14 bg-transparent text-right outline-none text-red-300 font-bold"
+                        />
+                        <span className="text-gray-500 text-[10px] ml-0.5">mm</span>
+                      </div>
+                      <div className="flex items-center bg-gray-950 border border-gray-700 rounded px-1.5 py-0.5 font-mono text-xs">
+                        <input
+                          type="number"
+                          step="1"
+                          min="1"
+                          value={Math.round((modelScale?.x ?? 1) * 100)}
+                          onChange={(e) => {
+                            const val = parseFloat(e.target.value);
+                            if (!isNaN(val) && val > 0) handleSetAxisScale('x', val / 100, true);
+                          }}
+                          className="w-11 bg-transparent text-right outline-none text-amber-300 font-bold"
+                        />
+                        <span className="text-gray-500 text-[10px] ml-0.5">%</span>
+                      </div>
+                    </div>
+                  </div>
+                  <input
+                    type="range"
+                    min="10"
+                    max="300"
+                    step="1"
+                    value={Math.round((modelScale?.x ?? 1) * 100)}
+                    onChange={(e) => handleSetAxisScale('x', parseFloat(e.target.value) / 100, false)}
+                    onMouseUp={(e) => handleSetAxisScale('x', parseFloat(e.target.value) / 100, true)}
+                    onTouchEnd={(e) => handleSetAxisScale('x', parseFloat(e.target.value) / 100, true)}
+                    className="w-full accent-red-500 cursor-pointer h-1.5 bg-gray-800 rounded-lg"
+                  />
+                </div>
+
+                {/* Y Axis Card */}
+                <div className="bg-gray-900/80 p-2.5 rounded-lg border border-emerald-900/40 flex flex-col gap-2">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-1.5">
+                      <span className="px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 font-mono font-bold text-[10px] border border-emerald-500/40">
+                        Y
+                      </span>
+                      <span className="text-xs font-semibold text-gray-200">Derinlik (Y):</span>
+                      <span className="text-[10px] text-gray-500 font-mono">
+                        (Orij: {liveScaledStats.origDimY} mm)
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <div className="flex items-center bg-gray-950 border border-gray-700 rounded px-1.5 py-0.5 font-mono text-xs">
+                        <input
+                          type="number"
+                          step="0.5"
+                          min="0.1"
+                          value={liveScaledStats.dimY}
+                          onChange={(e) => {
+                            const val = parseFloat(e.target.value);
+                            if (!isNaN(val) && val > 0) handleSetAxisDimension('y', val, true);
+                          }}
+                          className="w-14 bg-transparent text-right outline-none text-emerald-300 font-bold"
+                        />
+                        <span className="text-gray-500 text-[10px] ml-0.5">mm</span>
+                      </div>
+                      <div className="flex items-center bg-gray-950 border border-gray-700 rounded px-1.5 py-0.5 font-mono text-xs">
+                        <input
+                          type="number"
+                          step="1"
+                          min="1"
+                          value={Math.round((modelScale?.y ?? 1) * 100)}
+                          onChange={(e) => {
+                            const val = parseFloat(e.target.value);
+                            if (!isNaN(val) && val > 0) handleSetAxisScale('y', val / 100, true);
+                          }}
+                          className="w-11 bg-transparent text-right outline-none text-amber-300 font-bold"
+                        />
+                        <span className="text-gray-500 text-[10px] ml-0.5">%</span>
+                      </div>
+                    </div>
+                  </div>
+                  <input
+                    type="range"
+                    min="10"
+                    max="300"
+                    step="1"
+                    value={Math.round((modelScale?.y ?? 1) * 100)}
+                    onChange={(e) => handleSetAxisScale('y', parseFloat(e.target.value) / 100, false)}
+                    onMouseUp={(e) => handleSetAxisScale('y', parseFloat(e.target.value) / 100, true)}
+                    onTouchEnd={(e) => handleSetAxisScale('y', parseFloat(e.target.value) / 100, true)}
+                    className="w-full accent-emerald-500 cursor-pointer h-1.5 bg-gray-800 rounded-lg"
+                  />
+                </div>
+
+                {/* Z Axis Card */}
+                <div className="bg-gray-900/80 p-2.5 rounded-lg border border-blue-900/40 flex flex-col gap-2">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-1.5">
+                      <span className="px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-300 font-mono font-bold text-[10px] border border-blue-500/40">
+                        Z
+                      </span>
+                      <span className="text-xs font-semibold text-gray-200">Yükseklik (Z):</span>
+                      <span className="text-[10px] text-gray-500 font-mono">
+                        (Orij: {liveScaledStats.origDimZ} mm)
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <div className="flex items-center bg-gray-950 border border-gray-700 rounded px-1.5 py-0.5 font-mono text-xs">
+                        <input
+                          type="number"
+                          step="0.5"
+                          min="0.1"
+                          value={liveScaledStats.dimZ}
+                          onChange={(e) => {
+                            const val = parseFloat(e.target.value);
+                            if (!isNaN(val) && val > 0) handleSetAxisDimension('z', val, true);
+                          }}
+                          className="w-14 bg-transparent text-right outline-none text-blue-300 font-bold"
+                        />
+                        <span className="text-gray-500 text-[10px] ml-0.5">mm</span>
+                      </div>
+                      <div className="flex items-center bg-gray-950 border border-gray-700 rounded px-1.5 py-0.5 font-mono text-xs">
+                        <input
+                          type="number"
+                          step="1"
+                          min="1"
+                          value={Math.round((modelScale?.z ?? 1) * 100)}
+                          onChange={(e) => {
+                            const val = parseFloat(e.target.value);
+                            if (!isNaN(val) && val > 0) handleSetAxisScale('z', val / 100, true);
+                          }}
+                          className="w-11 bg-transparent text-right outline-none text-amber-300 font-bold"
+                        />
+                        <span className="text-gray-500 text-[10px] ml-0.5">%</span>
+                      </div>
+                    </div>
+                  </div>
+                  <input
+                    type="range"
+                    min="10"
+                    max="300"
+                    step="1"
+                    value={Math.round((modelScale?.z ?? 1) * 100)}
+                    onChange={(e) => handleSetAxisScale('z', parseFloat(e.target.value) / 100, false)}
+                    onMouseUp={(e) => handleSetAxisScale('z', parseFloat(e.target.value) / 100, true)}
+                    onTouchEnd={(e) => handleSetAxisScale('z', parseFloat(e.target.value) / 100, true)}
+                    className="w-full accent-blue-500 cursor-pointer h-1.5 bg-gray-800 rounded-lg"
+                  />
+                </div>
+              </div>
+
+              {/* Quick Presets Bar */}
+              <div className="bg-gray-950/60 p-3 rounded-xl border border-gray-800 flex flex-col gap-2">
+                <span className="text-[11px] font-semibold text-gray-400">Hızlı Ölçek Önayarları:</span>
+                <div className="grid grid-cols-4 gap-1.5">
+                  {[
+                    { label: '%25', val: 0.25 },
+                    { label: '%50', val: 0.5 },
+                    { label: '%75', val: 0.75 },
+                    { label: '%100 Orijinal', val: 1.0 },
+                    { label: '%125', val: 1.25 },
+                    { label: '%150', val: 1.5 },
+                    { label: '%200 (2x)', val: 2.0 },
+                    { label: '%300 (3x)', val: 3.0 }
+                  ].map((preset) => (
+                    <button
+                      key={preset.label}
+                      onClick={() => handleSetUniformScale(preset.val, true)}
+                      className={`py-1.5 px-2 rounded-lg text-xs font-semibold border transition ${
+                        Math.abs((modelScale?.x ?? 1) - preset.val) < 0.01 &&
+                        Math.abs((modelScale?.y ?? 1) - preset.val) < 0.01 &&
+                        Math.abs((modelScale?.z ?? 1) - preset.val) < 0.01
+                          ? 'bg-amber-500 text-gray-950 border-amber-400 font-bold shadow'
+                          : 'bg-gray-900 hover:bg-gray-850 text-gray-300 border-gray-700/80 hover:border-amber-500/40'
+                      }`}
+                    >
+                      {preset.label}
+                    </button>
+                  ))}
+                </div>
+
+                {/* Additional Smart Presets */}
+                <div className="grid grid-cols-2 gap-1.5 mt-1">
+                  <button
+                    onClick={() => handleFitToBed(200)}
+                    className="py-1.5 px-2 bg-gray-900 hover:bg-gray-850 text-cyan-300 border border-cyan-800/40 rounded-lg text-xs font-semibold transition flex items-center justify-center gap-1"
+                    title="Modelin en büyük boyutunu 200mm tabla sınırına orantılı sığdırır"
+                  >
+                    <Grid className="w-3 h-3 text-cyan-400" />
+                    <span>Tablaya Sığdır (200mm)</span>
+                  </button>
+                  <button
+                    onClick={onResetScale}
+                    disabled={!isScaled}
+                    className={`py-1.5 px-2 rounded-lg text-xs font-semibold border transition flex items-center justify-center gap-1 ${
+                      isScaled
+                        ? 'bg-gray-900 hover:bg-gray-850 text-amber-300 border-amber-800/40 cursor-pointer'
+                        : 'bg-gray-900 text-gray-600 border-gray-800 cursor-not-allowed'
+                    }`}
+                    title="Modeli 1.0 (%100) orijinal boyutuna sıfırlar"
+                  >
+                    <RotateCcw className="w-3 h-3 text-amber-400" />
+                    <span>Sıfırla (%100)</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Real-time Metrics Card (Volume, Mass, Surface Area, Bounding Dimensions) */}
+              <div className="bg-gradient-to-br from-emerald-950/30 via-gray-900 to-gray-950 p-3.5 rounded-xl border border-emerald-500/30 flex flex-col gap-3 shadow-lg">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-1.5 text-xs font-bold text-emerald-400">
+                    <Activity className="w-4 h-4 text-emerald-400" />
+                    <span>Gerçek Zamanlı Metrikler (Canlı)</span>
+                  </div>
+                  {isScaled ? (
+                    <span className="text-[10px] bg-amber-500/20 text-amber-300 border border-amber-500/30 px-2 py-0.5 rounded font-mono font-semibold">
+                      Ölçekli Model ({liveScaledStats.volumeRatio.toFixed(2)}x Hacim)
+                    </span>
+                  ) : (
+                    <span className="text-[10px] bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 px-2 py-0.5 rounded font-mono font-semibold">
+                      Orijinal Ölçek (1.0x)
+                    </span>
+                  )}
+                </div>
+
+                {/* Material Density Preset Selection Dropdown & Custom Input */}
+                <div className="bg-gray-950/90 p-2.5 rounded-xl border border-emerald-500/30 flex flex-col gap-2">
+                  <div className="flex items-center justify-between">
+                    <label htmlFor="density-preset-select-transform" className="text-[11px] font-semibold text-gray-300 flex items-center gap-1.5">
+                      <Scale className="w-3.5 h-3.5 text-cyan-400" />
+                      <span>Malzeme Yoğunluğu (Density Preset):</span>
+                    </label>
+                    <span className="text-[9px] font-mono text-emerald-400 bg-emerald-950/60 px-1.5 py-0.5 rounded border border-emerald-500/30">
+                      m = V × ρ
+                    </span>
+                  </div>
+
+                  {/* Common 3D Printing Material Presets Dropdown */}
+                  <select
+                    id="density-preset-select-transform"
+                    value={matchedPreset ? matchedPreset.density.toString() : 'custom'}
+                    onChange={(e) => {
+                      if (e.target.value === 'custom') {
+                        document.getElementById('custom-density-input-transform')?.focus();
+                      } else if (e.target.value) {
+                        handleDensitySelect(e.target.value);
+                      }
+                    }}
+                    className="w-full bg-gray-900 border border-gray-700 hover:border-cyan-500/60 focus:border-cyan-400 text-gray-200 text-xs rounded-lg px-2.5 py-1.5 font-medium cursor-pointer focus:outline-none focus:ring-1 focus:ring-cyan-400 transition"
+                    title="3D Baskı Malzemesi Yoğunluk Önayarı (PLA, ABS, PETG, TPU...)"
+                  >
+                    <option value="" disabled>
+                      Önayar Seç...
+                    </option>
+                    <optgroup label="⭐ Yaygın 3D Baskı Malzemeleri (Common 3D Printing)">
+                      {COMMON_DENSITY_PRESETS.map((p) => (
+                        <option
+                          key={p.id}
+                          value={p.density.toString()}
+                          className="bg-gray-900 text-emerald-300 font-semibold"
+                        >
+                          {p.name}: {p.density} g/cm³
+                        </option>
+                      ))}
+                    </optgroup>
+                    <optgroup label="Diğer Malzemeler & Reçineler">
+                      {OTHER_DENSITY_PRESETS.map((p) => (
+                        <option
+                          key={p.id}
+                          value={p.density.toString()}
+                          className="bg-gray-900 text-gray-300"
+                        >
+                          {p.name}: {p.density} g/cm³
+                        </option>
+                      ))}
+                    </optgroup>
+                    <option value="custom" className="bg-gray-900 text-amber-300 font-semibold">
+                      ✏️ Özel Malzeme (Manuel Değer Belirle)...
+                    </option>
+                  </select>
+
+                  {/* Quick Preset Buttons */}
+                  <div className="flex items-center gap-1 overflow-x-auto pb-0.5 no-scrollbar">
+                    <span className="text-[9px] text-gray-500 uppercase tracking-wider font-semibold mr-1 shrink-0">
+                      Hızlı:
+                    </span>
+                    {COMMON_DENSITY_PRESETS.map((preset) => {
+                      const isCurrent = matchedPreset?.id === preset.id;
+                      return (
+                        <button
+                          key={preset.id}
+                          type="button"
+                          onClick={() => handleDensitySelect(preset.density.toString())}
+                          className={`px-2 py-0.5 rounded-md text-[10px] font-medium transition flex items-center gap-1 shrink-0 ${
+                            isCurrent
+                              ? 'bg-cyan-600 text-white font-bold shadow-sm shadow-cyan-950 border border-cyan-400'
+                              : 'bg-gray-900 hover:bg-gray-800 text-gray-300 border border-gray-800'
+                          }`}
+                        >
+                          <span
+                            className="w-1.5 h-1.5 rounded-full"
+                            style={{ backgroundColor: preset.color }}
+                          />
+                          <span>{preset.name}</span>
+                          <span className="font-mono text-[9px] opacity-75">({preset.density})</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  {/* Dedicated Custom Density Numeric Input Field */}
+                  <div className="bg-gray-900/90 p-2 rounded-lg border border-gray-800 flex flex-col gap-1.5">
+                    <div className="flex items-center justify-between">
+                      <label htmlFor="custom-density-input-transform" className="text-[10px] font-semibold text-gray-300 flex items-center gap-1">
+                        <Edit3 className="w-3 h-3 text-amber-400" />
+                        <span>Özel Malzeme Yoğunluğu (Custom Density):</span>
+                      </label>
+                      {isCustomDensity ? (
+                        <span className="text-[9px] font-medium text-amber-400 bg-amber-950/60 border border-amber-500/40 px-1.5 py-0.5 rounded flex items-center gap-1">
+                          <span className="w-1 h-1 rounded-full bg-amber-400 animate-pulse" />
+                          Özel Değer Aktif
+                        </span>
+                      ) : (
+                        <span className="text-[9px] text-gray-500 font-mono">
+                          {matchedPreset?.name} ({matchedPreset?.density} g/cm³)
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <div className="relative flex-1">
+                        <input
+                          id="custom-density-input-transform"
+                          type="number"
+                          step="0.01"
+                          min="0.01"
+                          max="30"
+                          value={densityInputText}
+                          onChange={(e) => handleDensityInputChange(e.target.value)}
+                          className={`w-full bg-gray-950 border rounded-lg px-2.5 py-1.5 text-right font-mono font-bold text-white text-xs focus:outline-none focus:ring-1 shadow-inner pr-14 transition ${
+                            isCustomDensity
+                              ? 'border-amber-500/60 focus:border-amber-400 focus:ring-amber-400'
+                              : 'border-gray-700 hover:border-cyan-500/50 focus:border-cyan-400 focus:ring-cyan-400'
+                          }`}
+                          placeholder="Örn: 1.24"
+                          title="Malzemeniz listede yoksa özel yoğunluk değerini (g/cm³) elle girin"
+                        />
+                        <span className="absolute right-2 top-1/2 -translate-y-1/2 text-[10px] font-mono text-cyan-400 font-semibold pointer-events-none">
+                          g/cm³
+                        </span>
+                      </div>
+                      {isCustomDensity && (
+                        <button
+                          type="button"
+                          onClick={() => handleDensitySelect('1.24')}
+                          className="px-2 py-1.5 text-[10px] font-medium text-gray-400 hover:text-gray-200 bg-gray-950 hover:bg-gray-800 border border-gray-700 rounded-lg transition shrink-0"
+                          title="Varsayılan PLA yoğunluğuna (1.24 g/cm³) sıfırla"
+                        >
+                          Sıfırla
+                        </button>
+                      )}
+                    </div>
+                    <p className="text-[9px] text-gray-400 leading-tight">
+                      Malzemeniz önayarlar listesinde yoksa yoğunluğu elle belirleyin. Katı kütle anında otomatik hesaplanır.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2">
+                  {/* Volume Card */}
+                  <div className="bg-gray-950/80 p-2.5 rounded-lg border border-gray-800 flex flex-col gap-1">
+                    <div className="text-[10px] text-gray-400 font-medium">Katı Hacim:</div>
+                    <div className="text-sm font-bold font-mono text-emerald-400">
+                      {liveScaledStats.volumeCm3.toLocaleString('tr-TR', { minimumFractionDigits: 2 })} cm³
+                    </div>
+                    <div className="text-[10px] text-gray-500 font-mono">
+                      {liveScaledStats.volumeMm3.toLocaleString('tr-TR')} mm³
+                    </div>
+                  </div>
+
+                  {/* Mass Card */}
+                  <div className="bg-gray-950/80 p-2.5 rounded-lg border border-gray-800 flex flex-col gap-1">
+                    <div className="text-[10px] text-gray-400 font-medium flex items-center justify-between">
+                      <span>Tahmini Kütle:</span>
+                      <span className="text-[9px] font-mono text-cyan-300">
+                        (~{liveScaledStats.formattedMassKg})
+                      </span>
+                    </div>
+                    <div className="text-sm font-bold font-mono text-cyan-400">
+                      {liveScaledStats.formattedMassGrams}
+                    </div>
+                    <div className="text-[10px] text-gray-400 truncate">
+                      {ALL_DENSITY_PRESETS.find((p) => Math.abs(effectiveDensity - p.density) < 0.005)?.name || 'Özel'} ({effectiveDensity} g/cm³)
+                    </div>
+                  </div>
+
+                  {/* Surface Area Card */}
+                  <div className="bg-gray-950/80 p-2.5 rounded-lg border border-gray-800 flex flex-col gap-1">
+                    <div className="text-[10px] text-gray-400 font-medium">Yüzey Alanı:</div>
+                    <div className="text-sm font-bold font-mono text-amber-400">
+                      {liveScaledStats.surfaceAreaCm2.toLocaleString('tr-TR', { minimumFractionDigits: 2 })} cm²
+                    </div>
+                    <div className="text-[10px] text-gray-500 font-mono">
+                      {liveScaledStats.surfaceAreaMm2.toLocaleString('tr-TR')} mm²
+                    </div>
+                  </div>
+
+                  {/* Dimensions Card */}
+                  <div className="bg-gray-950/80 p-2.5 rounded-lg border border-gray-800 flex flex-col gap-1">
+                    <div className="text-[10px] text-gray-400 font-medium">Net Sınırlar (AABB):</div>
+                    <div className="text-[11px] font-bold font-mono text-gray-200">
+                      {liveScaledStats.dimX} × {liveScaledStats.dimY} × {liveScaledStats.dimZ}
+                    </div>
+                    <div className="text-[10px] text-gray-500">
+                      milimetre (X × Y × Z)
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Reset Scale Action Button */}
+              {onResetScale && (
+                <button
+                  onClick={onResetScale}
+                  disabled={!isScaled}
+                  className={`w-full py-2.5 px-4 rounded-xl font-bold text-xs flex items-center justify-center gap-2 shadow-lg transition ${
+                    isScaled
+                      ? 'bg-amber-600 hover:bg-amber-500 text-gray-950 shadow-amber-950/50 cursor-pointer active:scale-98'
+                      : 'bg-gray-850 text-gray-500 border border-gray-700/60 cursor-not-allowed opacity-60'
+                  }`}
+                >
+                  <RotateCcw className="w-4 h-4" />
+                  <span>Modeli Orijinal Boyutuna Sıfırla (1.0x / %100)</span>
+                </button>
+              )}
+            </div>
+          )}
+
+          {/* Sub-view: Rotation & Alignment Controls */}
+          {transformMode === 'rotate' && (
+            <div className="flex flex-col gap-4">
           {/* Header Description & 3D Gizmo Switch */}
           <div className="bg-gradient-to-br from-amber-950/40 via-gray-900 to-gray-950 p-3.5 rounded-xl border border-amber-500/30 flex flex-col gap-3">
             <div className="flex items-center justify-between">
@@ -1805,6 +2671,8 @@ export function ControlsPanel({
           </div>
         </div>
       )}
+    </div>
+  )}
 
       {/* Tab 2: Precision Measurement Tool */}
       {activeTab === 'measure' && (
@@ -2158,6 +3026,176 @@ export function ControlsPanel({
               </div>
             );
           })()}
+
+          {/* Material Density & Total Mass Analysis Panel in Measure Tab */}
+          <div className="bg-gradient-to-br from-gray-950 via-gray-900 to-cyan-950/40 p-3.5 rounded-xl border border-cyan-500/30 flex flex-col gap-2.5 shadow-lg">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-1.5 text-xs font-bold text-cyan-300">
+                <Scale className="w-4 h-4 text-cyan-400" />
+                <span>Malzeme Yoğunluğu & Kütle Analizi</span>
+              </div>
+              <span className="text-[9px] font-mono text-cyan-400 bg-cyan-950/60 px-2 py-0.5 rounded border border-cyan-500/30">
+                m = V × ρ
+              </span>
+            </div>
+
+            <p className="text-[10px] text-gray-400">
+              Yaygın 3D baskı malzemeleri önayarını seçin veya yoğunluğu elle girin. Katı kütle anında otomatik hesaplanır.
+            </p>
+
+            {/* Material Density Preset Selection Dropdown */}
+            <div className="flex flex-col gap-2">
+              <select
+                id="density-preset-select-measure"
+                value={matchedPreset ? matchedPreset.density.toString() : 'custom'}
+                onChange={(e) => {
+                  if (e.target.value === 'custom') {
+                    document.getElementById('custom-density-input-measure')?.focus();
+                  } else if (e.target.value) {
+                    handleDensitySelect(e.target.value);
+                  }
+                }}
+                className="w-full bg-gray-900 border border-gray-700 hover:border-cyan-500/60 focus:border-cyan-400 text-gray-200 text-xs rounded-lg px-2.5 py-1.5 font-medium cursor-pointer focus:outline-none focus:ring-1 focus:ring-cyan-400 transition"
+                title="Malzeme Yoğunluk Önayarı Seç (PLA, ABS, PETG, TPU...)"
+              >
+                <option value="" disabled>
+                  Önayar Seç...
+                </option>
+                <optgroup label="⭐ Yaygın 3D Baskı Malzemeleri (Common 3D Printing)">
+                  {COMMON_DENSITY_PRESETS.map((preset) => (
+                    <option
+                      key={preset.id}
+                      value={preset.density.toString()}
+                      className="bg-gray-900 text-emerald-300 font-semibold"
+                    >
+                      {preset.name}: {preset.density} g/cm³
+                    </option>
+                  ))}
+                </optgroup>
+                <optgroup label="Diğer Filamentler & Reçineler (Diğer)">
+                  {OTHER_DENSITY_PRESETS.map((preset) => (
+                    <option
+                      key={preset.id}
+                      value={preset.density.toString()}
+                      className="bg-gray-900 text-gray-300"
+                    >
+                      {preset.name}: {preset.density} g/cm³
+                    </option>
+                  ))}
+                </optgroup>
+                <option value="custom" className="bg-gray-900 text-amber-300 font-semibold">
+                  ✏️ Özel Malzeme (Manuel Değer Belirle)...
+                </option>
+              </select>
+
+              {/* Quick Presets Buttons */}
+              <div className="flex items-center gap-1 overflow-x-auto pb-0.5 no-scrollbar">
+                <span className="text-[9px] text-gray-500 uppercase tracking-wider font-semibold mr-1 shrink-0">
+                  Hızlı:
+                </span>
+                {COMMON_DENSITY_PRESETS.map((preset) => {
+                  const isCurrent = matchedPreset?.id === preset.id;
+                  return (
+                    <button
+                      key={preset.id}
+                      type="button"
+                      onClick={() => handleDensitySelect(preset.density.toString())}
+                      className={`px-2 py-0.5 rounded-md text-[10px] font-medium transition flex items-center gap-1 shrink-0 ${
+                        isCurrent
+                          ? 'bg-cyan-600 text-white font-bold shadow-sm shadow-cyan-950 border border-cyan-400'
+                          : 'bg-gray-900 hover:bg-gray-800 text-gray-300 border border-gray-800'
+                      }`}
+                    >
+                      <span
+                        className="w-1.5 h-1.5 rounded-full"
+                        style={{ backgroundColor: preset.color }}
+                      />
+                      <span>{preset.name}</span>
+                      <span className="font-mono text-[9px] opacity-75">({preset.density})</span>
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* Dedicated Custom Material Density Input Field */}
+              <div className="bg-gray-950/80 p-2.5 rounded-lg border border-gray-800 flex flex-col gap-1.5">
+                <div className="flex items-center justify-between">
+                  <label htmlFor="custom-density-input-measure" className="text-[10px] font-semibold text-gray-300 flex items-center gap-1">
+                    <Edit3 className="w-3 h-3 text-amber-400" />
+                    <span>Özel Malzeme Yoğunluğu (Custom Density):</span>
+                  </label>
+                  {isCustomDensity ? (
+                    <span className="text-[9px] font-medium text-amber-400 bg-amber-950/60 border border-amber-500/40 px-1.5 py-0.5 rounded flex items-center gap-1">
+                      <span className="w-1 h-1 rounded-full bg-amber-400 animate-pulse" />
+                      Özel Değer Aktif
+                    </span>
+                  ) : (
+                    <span className="text-[9px] text-gray-500 font-mono">
+                      Önayar: {matchedPreset?.name} ({matchedPreset?.density} g/cm³)
+                    </span>
+                  )}
+                </div>
+
+                <div className="flex items-center gap-1.5">
+                  <div className="relative flex-1">
+                    <input
+                      id="custom-density-input-measure"
+                      type="number"
+                      step="0.01"
+                      min="0.01"
+                      max="30"
+                      value={densityInputText}
+                      onChange={(e) => handleDensityInputChange(e.target.value)}
+                      className={`w-full bg-gray-900 border rounded-lg px-2.5 py-1.5 text-right font-mono font-bold text-white text-xs focus:outline-none focus:ring-1 shadow-inner pr-14 transition ${
+                        isCustomDensity
+                          ? 'border-amber-500/60 focus:border-amber-400 focus:ring-amber-400'
+                          : 'border-cyan-500/40 hover:border-cyan-400 focus:border-cyan-400 focus:ring-cyan-400'
+                      }`}
+                      placeholder="Örn: 1.24"
+                      title="Malzemeniz listede yoksa özel yoğunluk değerini (g/cm³) elle girin"
+                    />
+                    <span className="absolute right-2 top-1/2 -translate-y-1/2 text-[10px] font-mono text-cyan-400 font-semibold pointer-events-none">
+                      g/cm³
+                    </span>
+                  </div>
+
+                  {isCustomDensity && (
+                    <button
+                      type="button"
+                      onClick={() => handleDensitySelect('1.24')}
+                      className="px-2 py-1.5 text-[10px] font-medium text-gray-400 hover:text-gray-200 bg-gray-900 hover:bg-gray-800 border border-gray-700 rounded-lg transition shrink-0"
+                      title="Varsayılan PLA yoğunluğuna (1.24 g/cm³) sıfırla"
+                    >
+                      PLA&apos;ya Sıfırla
+                    </button>
+                  )}
+                </div>
+
+                <p className="text-[9px] text-gray-400 leading-tight">
+                  Malzemeniz listede yoksa özel yoğunluk değerini (g/cm³) girin. Model kütlesi anında otomatik hesaplanır.
+                </p>
+              </div>
+            </div>
+
+            {/* Mass Calculation Output Field */}
+            <div className="bg-gray-950/90 p-2.5 rounded-lg border border-gray-800 flex items-center justify-between">
+              <div>
+                <span className="text-[10px] text-gray-400 block font-medium">Otomatik Hesaplanan Model Kütlesi:</span>
+                <div className="text-base font-black font-mono text-cyan-300 flex items-baseline gap-1.5">
+                  <span>{liveScaledStats.formattedMassGrams}</span>
+                  <span className="text-[10px] font-normal text-gray-400 font-mono">
+                    (~{liveScaledStats.formattedMassKg})
+                  </span>
+                </div>
+              </div>
+              <div className="text-right">
+                <span className="text-[9px] text-gray-500 block font-mono">Hesap Formülü:</span>
+                <span className="text-[10px] font-mono text-gray-400">
+                  {liveScaledStats.volumeCm3.toLocaleString('tr-TR')} cm³ × {effectiveDensity} g/cm³
+                </span>
+              </div>
+            </div>
+          </div>
         </div>
       )}
 

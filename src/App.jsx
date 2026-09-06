@@ -15,6 +15,7 @@ import { createWorkspaceSnapshot, restoreWorkspaceSnapshot } from './utils/histo
 import {
   CommandStack,
   ModelTransformCommand,
+  ModelScaleCommand,
   CutPlaneAdjustCommand,
   PinPlacementCommand,
   SplitModelCommand,
@@ -110,6 +111,10 @@ export function App() {
   const [isRotateGizmoActive, setIsRotateGizmoActive] = useState(false);
   const [snapAngle, setSnapAngle] = useState(null);
 
+  // Model 3D Scale State (Uniform & Per-Axis)
+  const [modelScale, setModelScale] = useState({ x: 1, y: 1, z: 1 });
+  const [isUniformScale, setIsUniformScale] = useState(true);
+
   // Sliced Meshes & Exploded View
   const [splitResult, setSplitResult] = useState(null);
   const [explodedDistance, setExplodedDistance] = useState(15);
@@ -131,6 +136,7 @@ export function App() {
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
   const [showPostCutBanner, setShowPostCutBanner] = useState(false);
   const [activeControlsTab, setActiveControlsTab] = useState('slice');
+  const [materialDensity, setMaterialDensity] = useState(1.24); // g/cm³, default PLA
 
   // Overhang Heat-map and Print Orientation state
   const [heatmapConfig, setHeatmapConfig] = useState({
@@ -173,6 +179,9 @@ export function App() {
   const modelRotationRef = useRef(modelRotation);
   modelRotationRef.current = modelRotation;
 
+  const modelScaleRef = useRef(modelScale);
+  modelScaleRef.current = modelScale;
+
   const clippingConfigRef = useRef(clippingConfig);
   clippingConfigRef.current = clippingConfig;
 
@@ -200,6 +209,7 @@ export function App() {
   // Command Context provided to Command instances for executing/undoing/redoing state updates
   const commandContext = useMemo(() => ({
     setModelRotation: (rot) => setModelRotation(rot),
+    setModelScale: (scale) => setModelScale(scale),
     setClippingConfig: (cfg) => setClippingConfig(cfg),
     setPinConfig: (pin) => setPinConfig(pin),
     setSplitResult: (res) => {
@@ -257,6 +267,19 @@ export function App() {
         newRotation: targetRot,
         description,
         subType: subType || (type === 'MODEL_ALIGN' ? 'rotation_snap' : 'rotation_drag'),
+        isContinuous
+      });
+      executeCommand(cmd);
+      return;
+    }
+
+    if (type === 'MODEL_SCALE' || type === 'RESET_SCALE') {
+      const targetScale = overrides.modelScale !== undefined ? overrides.modelScale : modelScaleRef.current;
+      const cmd = new ModelScaleCommand({
+        previousScale: modelScaleRef.current,
+        newScale: targetScale,
+        description,
+        subType: subType || (type === 'RESET_SCALE' ? 'scale_reset' : 'scale_slider'),
         isContinuous
       });
       executeCommand(cmd);
@@ -926,12 +949,15 @@ export function App() {
       setFaceCount(info.triangles);
       setClippingConfig((prev) => ({ ...prev, offset: 0 }));
       setModelRotation({ x: 0, y: 0, z: 0 });
+      setModelScale({ x: 1, y: 1, z: 1 });
+      setIsUniformScale(true);
 
       // Initialize fresh history for new model with InitialModelCommand
       const initCmd = new InitialModelCommand({
         modelName: name,
         initialState: {
           modelRotation: { x: 0, y: 0, z: 0 },
+          modelScale: { x: 1, y: 1, z: 1 },
           splitResult: null,
           pinConfig,
           clippingConfig: { ...clippingConfig, offset: 0 },
@@ -1198,11 +1224,14 @@ export function App() {
         setFaceCount(info.triangles);
         setClippingConfig((prev) => ({ ...prev, offset: 0 }));
         setModelRotation({ x: 0, y: 0, z: 0 });
+        setModelScale({ x: 1, y: 1, z: 1 });
+        setIsUniformScale(true);
 
         const initCmd = new InitialModelCommand({
           modelName: file.name.replace(/\.stl$/i, ''),
           initialState: {
             modelRotation: { x: 0, y: 0, z: 0 },
+            modelScale: { x: 1, y: 1, z: 1 },
             splitResult: null,
             pinConfig,
             clippingConfig: { ...clippingConfig, offset: 0 },
@@ -1557,6 +1586,51 @@ export function App() {
   };
 
   /**
+   * Model Scale Handlers (Uniform & Per-Axis with real-time feedback and undo/redo support)
+   */
+  const handleModelScaleChange = (newScale, pushToHist = false, isContinuous = false) => {
+    const clampedScale = {
+      x: Math.max(0.01, Math.min(50, parseFloat(newScale?.x) || 1)),
+      y: Math.max(0.01, Math.min(50, parseFloat(newScale?.y) || 1)),
+      z: Math.max(0.01, Math.min(50, parseFloat(newScale?.z) || 1))
+    };
+
+    if (pushToHist) {
+      const prev = modelScaleRef.current;
+      const cmd = new ModelScaleCommand({
+        previousScale: prev,
+        newScale: clampedScale,
+        subType: 'scale_slider',
+        isContinuous
+      });
+      executeCommand(cmd);
+      setStatusMessage(
+        `Model ölçeklendi: X:%${Math.round(clampedScale.x * 100)} Y:%${Math.round(clampedScale.y * 100)} Z:%${Math.round(clampedScale.z * 100)}`
+      );
+    } else {
+      setModelScale(clampedScale);
+    }
+  };
+
+  const handleResetScale = () => {
+    const prev = modelScaleRef.current;
+    const resetScale = { x: 1, y: 1, z: 1 };
+    if (Math.abs((prev.x || 1) - 1) < 1e-4 && Math.abs((prev.y || 1) - 1) < 1e-4 && Math.abs((prev.z || 1) - 1) < 1e-4) {
+      setStatusMessage('Model ölçeği zaten orijinal boyutunda (%100 / 1.0x).');
+      return;
+    }
+    const cmd = new ModelScaleCommand({
+      previousScale: prev,
+      newScale: resetScale,
+      description: 'Model Ölçeği Sıfırlandı (%100 / 1.0x)',
+      subType: 'scale_reset',
+      isContinuous: false
+    });
+    executeCommand(cmd);
+    setStatusMessage('Model ölçeği orijinal boyutuna (1.0 / %100) sıfırlandı.');
+  };
+
+  /**
    * Direct STL Downloads
    */
   const handleExportPartA = () => {
@@ -1606,8 +1680,25 @@ export function App() {
 
   const handleExportFullModel = () => {
     if (model) {
-      downloadMeshSTL(model.geometry, `${modelName}.stl`, exportConfig.format, exportConfig);
-      setStatusMessage(`${modelName}.stl dosyası indirildi [${exportConfig.format.toUpperCase()} • %${Math.round(exportConfig.density * 100)}].`);
+      const isScaled =
+        Math.abs(modelScale.x - 1) > 1e-4 ||
+        Math.abs(modelScale.y - 1) > 1e-4 ||
+        Math.abs(modelScale.z - 1) > 1e-4;
+      if (isScaled) {
+        const geom = model.geometry.clone();
+        geom.scale(modelScale.x, modelScale.y, modelScale.z);
+        const fileName = `${modelName}_Scaled_${Math.round(modelScale.x * 100)}pct.stl`;
+        downloadMeshSTL(geom, fileName, exportConfig.format, exportConfig);
+        geom.dispose();
+        setStatusMessage(
+          `${fileName} dosyası indirildi [${exportConfig.format.toUpperCase()} • %${Math.round(exportConfig.density * 100)}].`
+        );
+      } else {
+        downloadMeshSTL(model.geometry, `${modelName}.stl`, exportConfig.format, exportConfig);
+        setStatusMessage(
+          `${modelName}.stl dosyası indirildi [${exportConfig.format.toUpperCase()} • %${Math.round(exportConfig.density * 100)}].`
+        );
+      }
     }
   };
 
@@ -1688,6 +1779,14 @@ export function App() {
         onToggleRotateGizmo={handleToggleRotateGizmo}
         snapAngle={snapAngle}
         onSetSnapAngle={setSnapAngle}
+        // Model Scale props
+        modelScale={modelScale}
+        onModelScaleChange={handleModelScaleChange}
+        onResetScale={handleResetScale}
+        isUniformScale={isUniformScale}
+        onToggleUniformScale={() => setIsUniformScale((prev) => !prev)}
+        materialDensity={materialDensity}
+        onMaterialDensityChange={setMaterialDensity}
         // History props
         canUndo={canUndo}
         canRedo={canRedo}
@@ -1971,6 +2070,10 @@ export function App() {
           onStepRotate={handleStepRotate}
           onResetRotation={handleResetRotation}
           onAlignFlat={handleAlignFlat}
+          // Model Scale props
+          modelScale={modelScale}
+          onModelScaleChange={handleModelScaleChange}
+          onResetScale={handleResetScale}
           // Mesh List Side Panel props
           isMeshListOpen={isMeshListOpen}
           onToggleMeshList={() => setIsMeshListOpen((prev) => !prev)}
@@ -2014,11 +2117,16 @@ export function App() {
       {/* Model Inspector Modal */}
       <ModelInspector
         info={modelInfo}
+        model={model}
         isOpen={isInspectorOpen}
         onClose={() => setIsInspectorOpen(false)}
         onOpenVolumeTool={() => setIsVolumeModalOpen(true)}
         showBoundingBox={showBoundingBox}
         onToggleBoundingBox={() => setShowBoundingBox((prev) => !prev)}
+        modelScale={modelScale}
+        onResetScale={handleResetScale}
+        density={materialDensity}
+        onChangeDensity={setMaterialDensity}
       />
 
       {/* STL Volume & 3D Print Material Calculator Modal */}
@@ -2030,6 +2138,8 @@ export function App() {
         splitResult={splitResult}
         showBoundingBox={showBoundingBox}
         onToggleBoundingBox={() => setShowBoundingBox((prev) => !prev)}
+        modelScale={modelScale}
+        onResetScale={handleResetScale}
       />
 
       {/* Sliced STL Export Modal */}

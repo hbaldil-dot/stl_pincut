@@ -1,4 +1,5 @@
 import { downloadBlob } from './stlExporter.js';
+import { addConfigHistoryEntry } from './configHistoryStorage.js';
 
 /**
  * Normalizes analysis metrics into a clean, structured payload.
@@ -126,6 +127,24 @@ export function downloadMetricsFile(metricsData, format = 'json') {
   const cleanName = (payload.modelName || 'model')
     .replace(/\.[^/.]+$/, '')
     .replace(/[^a-zA-Z0-9_\-]/g, '_');
+
+  // Automatically record this exported configuration into the history log
+  try {
+    addConfigHistoryEntry({
+      modelName: payload.modelName,
+      scale: metricsData?.scale || metricsData?.modelScale || { x: 1, y: 1, z: 1 },
+      material: {
+        name: metricsData?.materialName || 'Malzeme',
+        density: payload.material.density_g_cm3
+      },
+      volumeCm3: payload.volume.cm3,
+      massGrams: payload.mass.grams,
+      dimensions: payload.dimensions,
+      source: `export_${format}`
+    });
+  } catch (err) {
+    console.warn('[downloadMetricsFile] Failed to record in config history:', err);
+  }
 
   if (format === 'csv') {
     const csvContent = formatMetricsAsCSV(payload);

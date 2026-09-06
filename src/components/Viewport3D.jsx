@@ -45,6 +45,7 @@ import { PerformanceOverlay } from './PerformanceOverlay';
 function RotatableModelMesh({
   model,
   modelRotation,
+  modelScale,
   onModelRotationChange,
   onRotationEnd,
   isRotateGizmoActive,
@@ -56,7 +57,7 @@ function RotatableModelMesh({
 }) {
   const transformRef = useRef();
 
-  // Synchronize 3D mesh rotation with external degree states
+  // Synchronize 3D mesh rotation and scale with external states
   useEffect(() => {
     if (model) {
       model.rotation.set(
@@ -64,9 +65,14 @@ function RotatableModelMesh({
         THREE.MathUtils.degToRad(modelRotation?.y || 0),
         THREE.MathUtils.degToRad(modelRotation?.z || 0)
       );
+      model.scale.set(
+        modelScale?.x ?? 1,
+        modelScale?.y ?? 1,
+        modelScale?.z ?? 1
+      );
       model.updateMatrixWorld(true);
     }
-  }, [model, modelRotation]);
+  }, [model, modelRotation, modelScale]);
 
   useEffect(() => {
     const controls = transformRef.current;
@@ -258,6 +264,10 @@ export function Viewport3D({
   onStepRotate,
   onResetRotation,
   onAlignFlat,
+  // Model Scale props
+  modelScale = { x: 1, y: 1, z: 1 },
+  onModelScaleChange,
+  onResetScale,
   // Mesh List Outliner props
   isMeshListOpen = false,
   onToggleMeshList,
@@ -1266,6 +1276,7 @@ export function Viewport3D({
               <RotatableModelMesh
                 model={model}
                 modelRotation={modelRotation}
+                modelScale={modelScale}
                 onModelRotationChange={onModelRotationChange}
                 onRotationEnd={onRotationEnd}
                 isRotateGizmoActive={isRotateGizmoActive}
@@ -1288,6 +1299,7 @@ export function Viewport3D({
                 visible={showBoundingBox}
                 color="#06b6d4"
                 modelRotation={modelRotation}
+                modelScale={modelScale}
               />
 
               {/* 3D Clipping Plane Visual Helper Sheet */}

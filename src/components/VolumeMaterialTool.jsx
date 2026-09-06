@@ -26,7 +26,9 @@ import {
   Cpu,
   Download,
   FileCode,
-  FileSpreadsheet
+  FileSpreadsheet,
+  RotateCcw,
+  Edit3
 } from 'lucide-react';
 import { downloadMetricsFile } from '../utils/exportMetrics';
 import {
@@ -48,7 +50,9 @@ export function VolumeMaterialTool({
   onClose,
   isModal = false,
   showBoundingBox = false,
-  onToggleBoundingBox
+  onToggleBoundingBox,
+  modelScale = { x: 1, y: 1, z: 1 },
+  onResetScale
 }) {
   // Volume unit state: 'cm3' | 'mm3' | 'in3'
   const [unit, setUnit] = useState('cm3');
@@ -145,21 +149,26 @@ export function VolumeMaterialTool({
     }
   };
 
-  // Model geometry volume & surface area calculation
+  // Model geometry volume & surface area calculation (scales automatically in real-time)
   const modelVolumeStats = useMemo(() => {
     if (model?.geometry) {
-      return calculateGeometryVolume(model.geometry, model.scale);
+      return calculateGeometryVolume(model.geometry, modelScale || model.scale);
     }
     if (modelInfo) {
-      const vCm3 = modelInfo.volumeCm3 || 0;
-      const saCm2 = modelInfo.surfaceAreaCm2 || 0;
+      const sx = modelScale?.x ?? 1;
+      const sy = modelScale?.y ?? 1;
+      const sz = modelScale?.z ?? 1;
+      const scaleVolumeFactor = sx * sy * sz;
+      const scaleAreaFactor = Math.sqrt(sx * sy) * Math.sqrt(sy * sz); // Approximation for SA
+      const vCm3 = (modelInfo.volumeCm3 || 0) * scaleVolumeFactor;
+      const saCm2 = (modelInfo.surfaceAreaCm2 || 0) * (Math.abs(sx - sy) < 1e-4 ? sx * sx : scaleAreaFactor);
       return {
         volumeMm3: Math.round(vCm3 * 1000),
-        volumeCm3: vCm3,
+        volumeCm3: parseFloat(vCm3.toFixed(2)),
         volumeLiters: parseFloat((vCm3 / 1000).toFixed(4)),
         volumeIn3: parseFloat((vCm3 / 16.387).toFixed(2)),
         surfaceAreaMm2: Math.round(saCm2 * 100),
-        surfaceAreaCm2: saCm2,
+        surfaceAreaCm2: parseFloat(saCm2.toFixed(2)),
         surfaceAreaDm2: parseFloat((saCm2 / 100).toFixed(3)),
         surfaceAreaM2: parseFloat((saCm2 / 10000).toFixed(5)),
         surfaceAreaIn2: parseFloat((saCm2 / 6.4516).toFixed(2)),
@@ -180,7 +189,7 @@ export function VolumeMaterialTool({
       triangleCount: 0,
       averageTriangleAreaMm2: 0
     };
-  }, [model, modelInfo]);
+  }, [model, modelInfo, modelScale]);
 
   // Total solid model mass calculation (m = V * rho)
   const solidMassStats = useMemo(() => {
@@ -322,6 +331,34 @@ export function VolumeMaterialTool({
 
   return (
     <div className="flex flex-col gap-4 text-xs select-none">
+      {/* Active Model Scale Indicator Banner & Reset Action */}
+      {(Math.abs((modelScale?.x ?? 1) - 1) > 1e-3 ||
+        Math.abs((modelScale?.y ?? 1) - 1) > 1e-3 ||
+        Math.abs((modelScale?.z ?? 1) - 1) > 1e-3) && (
+        <div className="flex items-center justify-between p-2.5 px-3 bg-amber-500/10 border border-amber-500/30 rounded-xl text-amber-300">
+          <div className="flex items-center gap-2">
+            <Maximize2 className="w-4 h-4 text-amber-400 shrink-0" />
+            <span className="text-[11px]">
+              Model Yeniden Ölçeklendirildi:{' '}
+              <strong className="font-mono text-white">
+                X:%{Math.round((modelScale.x || 1) * 100)} Y:%{Math.round((modelScale.y || 1) * 100)} Z:%{Math.round((modelScale.z || 1) * 100)}
+              </strong>{' '}
+              <span className="text-amber-400/80">(Metrikler gerçek zamanlı güncelleniyor)</span>
+            </span>
+          </div>
+          {onResetScale && (
+            <button
+              onClick={onResetScale}
+              className="px-2.5 py-1 bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 border border-amber-500/40 rounded-lg text-[11px] font-semibold flex items-center gap-1.5 transition shadow-sm"
+              title="Modeli orijinal 1.0 (%100) boyutuna sıfırla"
+            >
+              <RotateCcw className="w-3.5 h-3.5" />
+              <span>Ölçeği Sıfırla (%100)</span>
+            </button>
+          )}
+        </div>
+      )}
+
       {/* 1. Triple Complementary Hero Metric Cards (Solid Volume, Total Surface Area, Total Solid Mass) */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
         {/* Hero Card A: Solid Volume */}
@@ -928,13 +965,13 @@ export function VolumeMaterialTool({
         </div>
 
         {/* Dedicated Material Density Input Field & Presets Dropdown */}
-        <div className="bg-gray-950/90 p-3 rounded-xl border border-gray-800 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-inner">
-          <div>
+        <div className="bg-gray-950/90 p-3 rounded-xl border border-gray-800 flex flex-col gap-2.5 shadow-inner">
+          <div className="flex items-center justify-between">
             <span className="text-[11px] font-semibold text-gray-200 block">
-              Malzeme Yoğunluğu (g/cm³)
+              Malzeme Yoğunluk Önayarı & Manuel Giriş:
             </span>
-            <span className="text-[10px] text-gray-400 block">
-              Açılır menüden hazır önayar seçin veya doğrudan yoğunluk değeri girin
+            <span className="text-[9px] font-mono text-cyan-400 bg-cyan-950/60 px-1.5 py-0.5 rounded border border-cyan-500/30">
+              m = V × ρ
             </span>
           </div>
 
@@ -944,7 +981,7 @@ export function VolumeMaterialTool({
               value={
                 PRINT_MATERIALS.find(
                   (m) => m.id !== 'custom' && Math.abs(m.density - parseFloat(densityInput)) < 0.005
-                )?.id || (selectedMaterialId !== 'custom' ? selectedMaterialId : '')
+                )?.id || 'custom'
               }
               onChange={(e) => {
                 const found = PRINT_MATERIALS.find((m) => m.id === e.target.value);
@@ -952,33 +989,88 @@ export function VolumeMaterialTool({
                   handleSelectMaterial(found);
                 }
               }}
-              className="bg-gray-900 border border-gray-700 hover:border-cyan-500/60 focus:border-cyan-400 text-gray-200 text-xs rounded-lg px-2.5 py-1.5 font-medium cursor-pointer focus:outline-none focus:ring-1 focus:ring-cyan-400 transition"
+              className="flex-1 bg-gray-900 border border-gray-700 hover:border-cyan-500/60 focus:border-cyan-400 text-gray-200 text-xs rounded-lg px-2.5 py-1.5 font-medium cursor-pointer focus:outline-none focus:ring-1 focus:ring-cyan-400 transition"
               title="Yaygın Malzeme Önayarları (PLA, PETG, ABS, Reçine, Alüminyum...)"
             >
               <option value="" disabled>
                 Önayar Seç...
               </option>
-              {PRINT_MATERIALS.filter((m) => m.id !== 'custom').map((mat) => (
-                <option key={mat.id} value={mat.id} className="bg-gray-900 text-gray-200">
-                  {mat.shortName || mat.name}: {mat.density} g/cm³
-                </option>
-              ))}
+              <optgroup label="⭐ Yaygın 3D Baskı Malzemeleri (Common)">
+                {PRINT_MATERIALS.filter((m) => ['pla', 'abs', 'petg', 'tpu'].includes(m.id)).map((mat) => (
+                  <option key={mat.id} value={mat.id} className="bg-gray-900 text-emerald-300 font-semibold">
+                    {mat.shortName || mat.name}: {mat.density} g/cm³
+                  </option>
+                ))}
+              </optgroup>
+              <optgroup label="Diğer Malzemeler & Reçine (Other)">
+                {PRINT_MATERIALS.filter((m) => !['pla', 'abs', 'petg', 'tpu', 'custom'].includes(m.id)).map((mat) => (
+                  <option key={mat.id} value={mat.id} className="bg-gray-900 text-gray-200">
+                    {mat.shortName || mat.name}: {mat.density} g/cm³
+                  </option>
+                ))}
+              </optgroup>
+              <option value="custom" className="bg-gray-900 text-amber-300 font-semibold">
+                ✏️ Özel Malzeme (Manuel Değer Belirle)...
+              </option>
             </select>
+          </div>
 
-            <input
-              type="number"
-              step="0.01"
-              min="0.01"
-              max="30"
-              value={densityInput}
-              onChange={(e) => handleDensityChange(e.target.value)}
-              className="w-20 bg-gray-900 border border-cyan-500/50 focus:border-cyan-400 rounded-lg px-2.5 py-1.5 text-right font-mono font-bold text-white text-xs focus:outline-none focus:ring-1 focus:ring-cyan-400 shadow-inner"
-              placeholder="1.24"
-              title="Yoğunluk değerini elle girin"
-            />
-            <span className="text-[11px] font-mono text-cyan-400 font-semibold bg-gray-900 px-2 py-1.5 rounded-lg border border-gray-800">
-              g/cm³
-            </span>
+          {/* Dedicated Custom Material Density Numeric Input Field */}
+          <div className="bg-gray-900/90 p-2 rounded-lg border border-gray-800 flex flex-col gap-1.5">
+            <div className="flex items-center justify-between">
+              <label htmlFor="custom-density-input-tool" className="text-[10px] font-semibold text-gray-300 flex items-center gap-1">
+                <Edit3 className="w-3 h-3 text-amber-400" />
+                <span>Özel Malzeme Yoğunluğu (Custom Density):</span>
+              </label>
+              {selectedMaterialId === 'custom' || !PRINT_MATERIALS.some((m) => m.id !== 'custom' && Math.abs(m.density - parseFloat(densityInput)) < 0.005) ? (
+                <span className="text-[9px] font-medium text-amber-400 bg-amber-950/60 border border-amber-500/40 px-1.5 py-0.5 rounded flex items-center gap-1">
+                  <span className="w-1 h-1 rounded-full bg-amber-400 animate-pulse" />
+                  Özel Değer Aktif
+                </span>
+              ) : (
+                <span className="text-[9px] text-gray-500 font-mono">
+                  {currentMaterial?.name} ({currentMaterial?.density} g/cm³)
+                </span>
+              )}
+            </div>
+
+            <div className="flex items-center gap-1.5">
+              <div className="relative flex-1">
+                <input
+                  id="custom-density-input-tool"
+                  type="number"
+                  step="0.01"
+                  min="0.01"
+                  max="30"
+                  value={densityInput}
+                  onChange={(e) => handleDensityChange(e.target.value)}
+                  className="w-full bg-gray-950 border border-cyan-500/50 focus:border-cyan-400 rounded-lg px-2.5 py-1.5 text-right font-mono font-bold text-white text-xs focus:outline-none focus:ring-1 focus:ring-cyan-400 shadow-inner pr-14"
+                  placeholder="1.24"
+                  title="Malzemeniz listede yoksa özel yoğunluk değerini (g/cm³) girin"
+                />
+                <span className="absolute right-2 top-1/2 -translate-y-1/2 text-[10px] font-mono text-cyan-400 font-semibold pointer-events-none">
+                  g/cm³
+                </span>
+              </div>
+
+              {(selectedMaterialId === 'custom' || !PRINT_MATERIALS.some((m) => m.id !== 'custom' && Math.abs(m.density - parseFloat(densityInput)) < 0.005)) && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    const pla = PRINT_MATERIALS.find((m) => m.id === 'pla');
+                    if (pla) handleSelectMaterial(pla);
+                  }}
+                  className="px-2 py-1.5 text-[10px] font-medium text-gray-400 hover:text-gray-200 bg-gray-950 hover:bg-gray-800 border border-gray-700 rounded-lg transition shrink-0"
+                  title="Varsayılan PLA yoğunluğuna (1.24 g/cm³) sıfırla"
+                >
+                  Sıfırla
+                </button>
+              )}
+            </div>
+
+            <p className="text-[9px] text-gray-400 leading-tight">
+              Malzemeniz hazır listede yoksa özel yoğunluk değerini (g/cm³) girerek kütle ve maliyet hesabını anında özelleştirebilirsiniz.
+            </p>
           </div>
         </div>
 

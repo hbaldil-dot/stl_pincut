@@ -282,6 +282,32 @@ export function formatMass(massGrams, unit = 'g') {
 }
 
 /**
+ * Common 3D Printing Material Presets specifically for mass and density analysis:
+ * PLA, ABS, PETG, TPU
+ */
+export const COMMON_DENSITY_PRESETS = [
+  { id: 'pla', name: 'PLA', fullName: 'PLA (Polilaktik Asit)', density: 1.24, color: '#10b981', label: 'PLA (1.24 g/cm³)' },
+  { id: 'abs', name: 'ABS', fullName: 'ABS (Akrilonitril Bütadien Stiren)', density: 1.04, color: '#f59e0b', label: 'ABS (1.04 g/cm³)' },
+  { id: 'petg', name: 'PETG', fullName: 'PETG (Glikol Modifiyeli PET)', density: 1.27, color: '#3b82f6', label: 'PETG (1.27 g/cm³)' },
+  { id: 'tpu', name: 'TPU', fullName: 'TPU 95A (Esnek / Flex)', density: 1.21, color: '#8b5cf6', label: 'TPU (1.21 g/cm³)' }
+];
+
+export const OTHER_DENSITY_PRESETS = [
+  { id: 'pla_plus', name: 'PLA+', fullName: 'PLA+ / Tough PLA', density: 1.25, color: '#06b6d4', label: 'PLA+ (1.25 g/cm³)' },
+  { id: 'asa', name: 'ASA', fullName: 'ASA (Hava & UV Dayanımlı)', density: 1.07, color: '#ea580c', label: 'ASA (1.07 g/cm³)' },
+  { id: 'nylon', name: 'Naylon (PA)', fullName: 'Naylon PA12', density: 1.14, color: '#ec4899', label: 'Naylon PA12 (1.14 g/cm³)' },
+  { id: 'pc', name: 'PC', fullName: 'PC (Polikarbonat)', density: 1.20, color: '#6366f1', label: 'PC (1.20 g/cm³)' },
+  { id: 'resin_standard', name: 'Reçine (SLA)', fullName: 'Standart UV Reçine (SLA/DLP)', density: 1.10, color: '#14b8a6', label: 'Reçine SLA (1.10 g/cm³)' },
+  { id: 'aluminum', name: 'Alüminyum', fullName: 'Alüminyum (6061)', density: 2.70, color: '#94a3b8', label: 'Alüminyum (2.70 g/cm³)' },
+  { id: 'steel', name: 'Çelik', fullName: 'Paslanmaz Çelik', density: 7.85, color: '#e2e8f0', label: 'Çelik (7.85 g/cm³)' }
+];
+
+export const ALL_DENSITY_PRESETS = [
+  ...COMMON_DENSITY_PRESETS,
+  ...OTHER_DENSITY_PRESETS
+];
+
+/**
  * 3D Printing Materials Database
  * Densities in g/cm^3, standard market prices, typical printing properties
  */

@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import {
   Box,
   Layers,
@@ -18,25 +18,21 @@ import {
   FileSpreadsheet,
   Check,
   Gauge,
-  Activity
+  Activity,
+  RotateCcw,
+  Edit3
 } from 'lucide-react';
-import { calculateModelMass } from '../utils/volumeCalculator';
+import {
+  calculateModelMass,
+  calculateGeometryVolume,
+  COMMON_DENSITY_PRESETS,
+  OTHER_DENSITY_PRESETS,
+  ALL_DENSITY_PRESETS
+} from '../utils/volumeCalculator';
 import { downloadMetricsFile } from '../utils/exportMetrics';
 import { getComplexityTier } from './PerformanceOverlay';
 
-const DENSITY_PRESETS = [
-  { id: 'pla', name: 'PLA', density: 1.24, label: 'PLA: 1.24 g/cm³', color: '#10b981' },
-  { id: 'pla_plus', name: 'PLA+', density: 1.25, label: 'PLA+: 1.25 g/cm³', color: '#38bdf8' },
-  { id: 'petg', name: 'PETG', density: 1.27, label: 'PETG: 1.27 g/cm³', color: '#06b6d4' },
-  { id: 'abs', name: 'ABS', density: 1.04, label: 'ABS: 1.04 g/cm³', color: '#f59e0b' },
-  { id: 'asa', name: 'ASA', density: 1.07, label: 'ASA: 1.07 g/cm³', color: '#ea580c' },
-  { id: 'tpu', name: 'TPU', density: 1.21, label: 'TPU: 1.21 g/cm³', color: '#8b5cf6' },
-  { id: 'nylon', name: 'Naylon (PA)', density: 1.14, label: 'Naylon: 1.14 g/cm³', color: '#ec4899' },
-  { id: 'pc', name: 'PC', density: 1.20, label: 'PC: 1.20 g/cm³', color: '#6366f1' },
-  { id: 'resin', name: 'Reçine (SLA)', density: 1.10, label: 'Reçine: 1.10 g/cm³', color: '#14b8a6' },
-  { id: 'alu', name: 'Alüminyum', density: 2.70, label: 'Alüminyum: 2.70 g/cm³', color: '#94a3b8' },
-  { id: 'steel', name: 'Çelik', density: 7.85, label: 'Çelik: 7.85 g/cm³', color: '#e2e8f0' }
-];
+const DENSITY_PRESETS = ALL_DENSITY_PRESETS;
 
 export function ModelInspector({
   info,
@@ -44,20 +40,107 @@ export function ModelInspector({
   onClose,
   onOpenVolumeTool,
   showBoundingBox = false,
-  onToggleBoundingBox
+  onToggleBoundingBox,
+  modelScale = { x: 1, y: 1, z: 1 },
+  onResetScale,
+  model,
+  density: propDensity,
+  onChangeDensity
 }) {
   const [volumeUnit, setVolumeUnit] = useState('cm3');
   const [surfaceUnit, setSurfaceUnit] = useState('cm2');
-  const [density, setDensity] = useState('1.24');
+  const [internalDensity, setInternalDensity] = useState('1.24');
   const [massUnit, setMassUnit] = useState('g'); // 'g' | 'kg' | 'oz' | 'lb'
   const [exportedFormat, setExportedFormat] = useState(null);
 
+  const initialDensityStr = propDensity !== undefined ? propDensity.toString() : internalDensity;
+  const [densityInputText, setDensityInputText] = useState(initialDensityStr);
+
+  useEffect(() => {
+    if (propDensity !== undefined) {
+      const parsed = parseFloat(densityInputText);
+      if (isNaN(parsed) || Math.abs(parsed - propDensity) > 0.0001) {
+        setDensityInputText(propDensity.toString());
+      }
+    }
+  }, [propDensity]);
+
+  const density = propDensity !== undefined ? propDensity.toString() : internalDensity;
+
+  const handleDensityInputChange = (val) => {
+    setDensityInputText(val);
+    const num = parseFloat(val);
+    if (!isNaN(num) && num > 0) {
+      setInternalDensity(val);
+      if (onChangeDensity) onChangeDensity(num);
+    }
+  };
+
+  const handleDensitySelect = (val) => {
+    const num = parseFloat(val);
+    if (!isNaN(num) && num > 0) {
+      setDensityInputText(num.toString());
+      setInternalDensity(num.toString());
+      if (onChangeDensity) onChangeDensity(num);
+    }
+  };
+
+  const densityNum = parseFloat(density);
+  const matchedPreset = DENSITY_PRESETS.find(
+    (p) => !isNaN(densityNum) && Math.abs(densityNum - p.density) < 0.005
+  );
+  const isCustomDensity = !matchedPreset;
+
+  const sx = modelScale?.x ?? 1;
+  const sy = modelScale?.y ?? 1;
+  const sz = modelScale?.z ?? 1;
+  const isScaled = Math.abs(sx - 1) > 1e-3 || Math.abs(sy - 1) > 1e-3 || Math.abs(sz - 1) > 1e-3;
+
+  // Real-time scaled volume and surface area calculation
+  const calculatedStats = useMemo(() => {
+    if (model?.geometry) {
+      try {
+        const stats = calculateGeometryVolume(model.geometry, { x: sx, y: sy, z: sz });
+        return {
+          volumeCm3: stats.volumeCm3,
+          volumeMm3: stats.volumeMm3,
+          surfaceAreaCm2: stats.surfaceAreaCm2,
+          surfaceAreaMm2: stats.surfaceAreaMm2
+        };
+      } catch (e) {
+        // Fallback to proportional
+      }
+    }
+    const baseV = info?.volumeCm3 ?? 0;
+    const baseA = info?.surfaceAreaCm2 ?? 0;
+    const vCm3 = baseV * (isScaled ? sx * sy * sz : 1);
+    const areaRatio = isScaled
+      ? (Math.abs(sx - sy) < 1e-4 && Math.abs(sy - sz) < 1e-4 ? sx * sx : (sx * sy + sy * sz + sz * sx) / 3)
+      : 1;
+    const saCm2 = baseA * areaRatio;
+    return {
+      volumeCm3: parseFloat(vCm3.toFixed(2)),
+      volumeMm3: Math.round(vCm3 * 1000),
+      surfaceAreaCm2: parseFloat(saCm2.toFixed(2)),
+      surfaceAreaMm2: Math.round(saCm2 * 100)
+    };
+  }, [model?.geometry, sx, sy, sz, isScaled, info?.volumeCm3, info?.surfaceAreaCm2]);
+
   if (!isOpen || !info) return null;
+
+  const volumeCm3 = calculatedStats.volumeCm3;
+  const volumeMm3 = calculatedStats.volumeMm3;
+  const surfaceAreaCm2 = calculatedStats.surfaceAreaCm2;
+  const surfaceAreaMm2 = calculatedStats.surfaceAreaMm2;
 
   const handleExportMetrics = (format) => {
     downloadMetricsFile({
       modelName: info.name,
-      dimensions: info.dimensions,
+      dimensions: {
+        x: ((info.dimensions?.x || 0) * (isScaled ? sx : 1)).toFixed(2),
+        y: ((info.dimensions?.y || 0) * (isScaled ? sy : 1)).toFixed(2),
+        z: ((info.dimensions?.z || 0) * (isScaled ? sz : 1)).toFixed(2)
+      },
       volumeStats: {
         volumeCm3,
         volumeMm3,
@@ -84,19 +167,15 @@ export function ModelInspector({
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
   };
 
-  const volumeCm3 = info.volumeCm3 ?? 0;
-  const volumeMm3 = Math.round(volumeCm3 * 1000);
   const formattedVolume =
     volumeUnit === 'mm3'
       ? `${volumeMm3.toLocaleString('tr-TR')} mm³`
-      : `${volumeCm3.toLocaleString('tr-TR')} cm³`;
+      : `${volumeCm3.toLocaleString('tr-TR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} cm³`;
 
-  const surfaceAreaCm2 = info.surfaceAreaCm2 ?? 0;
-  const surfaceAreaMm2 = Math.round(surfaceAreaCm2 * 100);
   const formattedSurfaceArea =
     surfaceUnit === 'mm2'
       ? `${surfaceAreaMm2.toLocaleString('tr-TR')} mm²`
-      : `${surfaceAreaCm2.toLocaleString('tr-TR')} cm²`;
+      : `${surfaceAreaCm2.toLocaleString('tr-TR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} cm²`;
 
   const numDensity = Math.max(0.001, parseFloat(density) || 0);
   const massStats = useMemo(() => {
@@ -146,6 +225,43 @@ export function ModelInspector({
             </span>
           </div>
 
+          {/* Active Model Scale Indicator Banner & Single-Click Reset Action */}
+          {(Math.abs((modelScale?.x ?? 1) - 1) > 1e-3 ||
+            Math.abs((modelScale?.y ?? 1) - 1) > 1e-3 ||
+            Math.abs((modelScale?.z ?? 1) - 1) > 1e-3) && (
+            <div className="bg-amber-500/10 border border-amber-500/30 p-3 rounded-xl flex items-center justify-between text-amber-300">
+              <div className="flex items-center gap-2.5">
+                <div className="p-1.5 bg-amber-500/20 text-amber-400 rounded-lg">
+                  <Maximize2 className="w-4 h-4" />
+                </div>
+                <div>
+                  <div className="font-semibold text-xs text-white flex items-center gap-1.5">
+                    <span>Model Ölçeklendirilmiş</span>
+                    <span className="text-[10px] bg-amber-500/30 text-amber-200 px-1.5 py-0.2 rounded font-mono font-bold">
+                      {Math.abs((modelScale.x || 1) - (modelScale.y || 1)) < 1e-3 && Math.abs((modelScale.y || 1) - (modelScale.z || 1)) < 1e-3
+                        ? `%${Math.round((modelScale.x || 1) * 100)} (${(modelScale.x || 1).toFixed(2)}x)`
+                        : `X:%${Math.round((modelScale.x || 1) * 100)} Y:%${Math.round((modelScale.y || 1) * 100)} Z:%${Math.round((modelScale.z || 1) * 100)}`}
+                    </span>
+                  </div>
+                  <div className="text-[10px] text-gray-400 mt-0.5">
+                    Hacim, kütle ve yüzey alanı ölçek faktörüne göre canlı hesaplandı.
+                  </div>
+                </div>
+              </div>
+              {onResetScale && (
+                <button
+                  type="button"
+                  onClick={onResetScale}
+                  className="px-2.5 py-1 bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 border border-amber-500/40 rounded-lg text-[11px] font-semibold flex items-center gap-1.5 transition shadow-sm shrink-0"
+                  title="Modeli orijinal 1.0 (%100) boyutuna sıfırla"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  <span>Ölçeği Sıfırla (%100)</span>
+                </button>
+              )}
+            </div>
+          )}
+
           {/* Geometric Dimensions (X, Y, Z Bounding Box in mm) */}
           <div className="bg-gray-950/40 p-3.5 rounded-xl border border-gray-800 space-y-2.5">
             <div className="flex items-center justify-between">
@@ -180,15 +296,36 @@ export function ModelInspector({
             <div className="grid grid-cols-3 gap-2 text-center">
               <div className="bg-gray-900 p-2.5 rounded-lg border border-gray-800">
                 <span className="text-[10px] text-gray-400 block font-mono">X (Genişlik)</span>
-                <span className="text-sm font-bold text-red-400 font-mono">{info.dimensions.x} mm</span>
+                <span className="text-sm font-bold text-red-400 font-mono">
+                  {((info.dimensions?.x || 0) * (isScaled ? sx : 1)).toFixed(1)} mm
+                </span>
+                {isScaled && (
+                  <span className="text-[9px] text-gray-500 block font-mono">
+                    (Orij: {info.dimensions?.x} mm)
+                  </span>
+                )}
               </div>
               <div className="bg-gray-900 p-2.5 rounded-lg border border-gray-800">
                 <span className="text-[10px] text-gray-400 block font-mono">Y (Yükseklik)</span>
-                <span className="text-sm font-bold text-green-400 font-mono">{info.dimensions.y} mm</span>
+                <span className="text-sm font-bold text-green-400 font-mono">
+                  {((info.dimensions?.y || 0) * (isScaled ? sy : 1)).toFixed(1)} mm
+                </span>
+                {isScaled && (
+                  <span className="text-[9px] text-gray-500 block font-mono">
+                    (Orij: {info.dimensions?.y} mm)
+                  </span>
+                )}
               </div>
               <div className="bg-gray-900 p-2.5 rounded-lg border border-gray-800">
                 <span className="text-[10px] text-gray-400 block font-mono">Z (Derinlik)</span>
-                <span className="text-sm font-bold text-blue-400 font-mono">{info.dimensions.z} mm</span>
+                <span className="text-sm font-bold text-blue-400 font-mono">
+                  {((info.dimensions?.z || 0) * (isScaled ? sz : 1)).toFixed(1)} mm
+                </span>
+                {isScaled && (
+                  <span className="text-[9px] text-gray-500 block font-mono">
+                    (Orij: {info.dimensions?.z} mm)
+                  </span>
+                )}
               </div>
             </div>
 
@@ -492,85 +629,147 @@ export function ModelInspector({
             </div>
 
             {/* Density Input Field & Presets */}
-            <div className="space-y-2">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 bg-gray-950/80 p-2.5 rounded-xl border border-gray-800">
-                <label className="text-[11px] font-medium text-gray-300 flex items-center gap-1.5">
-                  <Droplet className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
-                  <span>Malzeme Yoğunluğu (Density):</span>
-                </label>
+            <div className="space-y-2.5">
+              {/* Material Preset Selection */}
+              <div className="bg-gray-950/80 p-2.5 rounded-xl border border-gray-800 flex flex-col gap-2">
+                <div className="flex items-center justify-between">
+                  <label htmlFor="material-preset-select-inspector" className="text-[11px] font-medium text-gray-300 flex items-center gap-1.5">
+                    <Droplet className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+                    <span>Malzeme Önayarı (Material Preset):</span>
+                  </label>
+                  <span className="text-[10px] text-gray-500 font-mono">
+                    m = V × ρ
+                  </span>
+                </div>
 
-                <div className="flex items-center gap-1.5 flex-wrap sm:flex-nowrap">
-                  {/* Preset Dropdown Menu */}
-                  <select
-                    value={
-                      DENSITY_PRESETS.find(
-                        (p) => Math.abs(parseFloat(density) - p.density) < 0.005
-                      )?.density.toString() || ''
+                <select
+                  id="material-preset-select-inspector"
+                  value={matchedPreset ? matchedPreset.density.toString() : 'custom'}
+                  onChange={(e) => {
+                    if (e.target.value === 'custom') {
+                      document.getElementById('custom-density-input-inspector')?.focus();
+                    } else if (e.target.value) {
+                      handleDensitySelect(e.target.value);
                     }
-                    onChange={(e) => {
-                      if (e.target.value) {
-                        setDensity(e.target.value);
-                      }
-                    }}
-                    className="bg-gray-900 border border-gray-700 hover:border-emerald-500/60 focus:border-emerald-400 text-gray-200 text-xs rounded-lg px-2.5 py-1 font-medium cursor-pointer focus:outline-none focus:ring-1 focus:ring-emerald-400 transition"
-                    title="Malzeme Önayarı Seç (PLA, PETG, ABS...)"
-                  >
-                    <option value="" disabled>
-                      Önayar Seç...
-                    </option>
-                    {DENSITY_PRESETS.map((preset) => (
+                  }}
+                  className="w-full bg-gray-900 border border-gray-700 hover:border-emerald-500/60 focus:border-emerald-400 text-gray-200 text-xs rounded-lg px-2.5 py-1.5 font-medium cursor-pointer focus:outline-none focus:ring-1 focus:ring-emerald-400 transition"
+                  title="3D Baskı Malzemesi Önayarı Seç (PLA, ABS, PETG, TPU...)"
+                >
+                  <option value="" disabled>
+                    Önayar Seç...
+                  </option>
+                  <optgroup label="⭐ Yaygın 3D Baskı Malzemeleri (Common 3D Printing)">
+                    {COMMON_DENSITY_PRESETS.map((preset) => (
                       <option
                         key={preset.id}
                         value={preset.density.toString()}
-                        className="bg-gray-900 text-gray-200"
+                        className="bg-gray-900 text-emerald-300 font-semibold"
                       >
                         {preset.name}: {preset.density} g/cm³
                       </option>
                     ))}
-                  </select>
+                  </optgroup>
+                  <optgroup label="Diğer Filamentler & Reçineler (Diğer)">
+                    {OTHER_DENSITY_PRESETS.map((preset) => (
+                      <option
+                        key={preset.id}
+                        value={preset.density.toString()}
+                        className="bg-gray-900 text-gray-300"
+                      >
+                        {preset.name}: {preset.density} g/cm³
+                      </option>
+                    ))}
+                  </optgroup>
+                  <option value="custom" className="bg-gray-900 text-amber-300 font-semibold">
+                    ✏️ Özel Malzeme (Listede Olmayan Malzeme / Manuel Giriş)...
+                  </option>
+                </select>
 
-                  <input
-                    type="number"
-                    step="0.01"
-                    min="0.01"
-                    max="30"
-                    value={density}
-                    onChange={(e) => setDensity(e.target.value)}
-                    className="w-20 bg-gray-900 border border-emerald-500/50 focus:border-emerald-400 rounded-lg px-2.5 py-1 text-right font-mono font-bold text-white text-xs focus:outline-none focus:ring-1 focus:ring-emerald-400"
-                    placeholder="1.24"
-                    title="Yoğunluk değerini manuel girin"
-                  />
-                  <span className="text-[11px] font-mono text-emerald-400 font-semibold bg-gray-900 px-2 py-1 rounded border border-gray-800 shrink-0">
-                    g/cm³
-                  </span>
+                {/* Quick Material Presets */}
+                <div className="flex items-center gap-1 overflow-x-auto pb-0.5 no-scrollbar">
+                  <span className="text-[9px] text-gray-500 uppercase tracking-wider font-semibold mr-1 shrink-0">Hızlı Seç:</span>
+                  {COMMON_DENSITY_PRESETS.map((preset) => {
+                    const isCurrent = matchedPreset?.id === preset.id;
+                    return (
+                      <button
+                        key={preset.id}
+                        type="button"
+                        onClick={() => handleDensitySelect(preset.density.toString())}
+                        className={`px-2.5 py-1 rounded-lg text-[10px] font-medium transition flex items-center gap-1.5 shrink-0 ${
+                          isCurrent
+                            ? 'bg-emerald-600 text-white font-bold shadow-md shadow-emerald-950 border border-emerald-400'
+                            : 'bg-gray-900/80 hover:bg-gray-800 text-gray-300 border border-gray-800'
+                        }`}
+                      >
+                        <span
+                          className="w-2 h-2 rounded-full"
+                          style={{ backgroundColor: preset.color }}
+                        />
+                        <span className="font-bold">{preset.name}</span>
+                        <span className="font-mono text-[9px] opacity-80">({preset.density} g/cm³)</span>
+                      </button>
+                    );
+                  })}
                 </div>
               </div>
 
-              {/* Quick Material Presets */}
-              <div className="flex items-center gap-1 overflow-x-auto pb-0.5 no-scrollbar">
-                <span className="text-[9px] text-gray-500 uppercase tracking-wider font-semibold mr-1 shrink-0">Hızlı Seç:</span>
-                {DENSITY_PRESETS.map((preset) => {
-                  const isCurrent = Math.abs(parseFloat(density) - preset.density) < 0.005;
-                  return (
-                    <button
-                      key={preset.id}
-                      type="button"
-                      onClick={() => setDensity(preset.density.toString())}
-                      className={`px-2 py-1 rounded-lg text-[10px] font-medium transition flex items-center gap-1 shrink-0 ${
-                        isCurrent
-                          ? 'bg-emerald-600 text-white font-bold shadow-sm shadow-emerald-950'
-                          : 'bg-gray-900/80 hover:bg-gray-800 text-gray-300 border border-gray-800'
+              {/* Dedicated Custom Material Density Numeric Input Field */}
+              <div className="bg-gray-950/80 p-2.5 rounded-xl border border-gray-800 flex flex-col gap-1.5">
+                <div className="flex items-center justify-between">
+                  <label htmlFor="custom-density-input-inspector" className="text-[11px] font-medium text-gray-300 flex items-center gap-1.5">
+                    <Edit3 className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                    <span>Özel Malzeme Yoğunluğu (Custom Density):</span>
+                  </label>
+                  {isCustomDensity ? (
+                    <span className="text-[10px] font-medium text-amber-400 bg-amber-950/60 border border-amber-500/40 px-1.5 py-0.5 rounded flex items-center gap-1">
+                      <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
+                      Özel Değer Aktif
+                    </span>
+                  ) : (
+                    <span className="text-[10px] text-gray-500 font-mono">
+                      Önayar: {matchedPreset?.name} ({matchedPreset?.density} g/cm³)
+                    </span>
+                  )}
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <div className="relative flex-1">
+                    <input
+                      id="custom-density-input-inspector"
+                      type="number"
+                      step="0.01"
+                      min="0.01"
+                      max="30"
+                      value={densityInputText}
+                      onChange={(e) => handleDensityInputChange(e.target.value)}
+                      className={`w-full bg-gray-900 border rounded-lg px-3 py-1.5 text-white font-mono font-bold text-xs focus:outline-none focus:ring-1 shadow-inner pr-16 transition ${
+                        isCustomDensity
+                          ? 'border-amber-500/60 focus:border-amber-400 focus:ring-amber-400'
+                          : 'border-gray-700 hover:border-emerald-500/50 focus:border-emerald-400 focus:ring-emerald-400'
                       }`}
+                      placeholder="Örn: 1.24"
+                      title="Malzemeniz önayarlar listesinde yoksa özel yoğunluk değerini (g/cm³) girin"
+                    />
+                    <span className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[11px] font-mono text-emerald-400 font-semibold pointer-events-none">
+                      g/cm³
+                    </span>
+                  </div>
+
+                  {isCustomDensity && (
+                    <button
+                      type="button"
+                      onClick={() => handleDensitySelect('1.24')}
+                      className="px-2.5 py-1.5 text-[10px] font-medium text-gray-400 hover:text-gray-200 bg-gray-900 hover:bg-gray-800 border border-gray-700 rounded-lg transition shrink-0"
+                      title="Varsayılan PLA yoğunluğuna (1.24 g/cm³) sıfırla"
                     >
-                      <span
-                        className="w-1.5 h-1.5 rounded-full"
-                        style={{ backgroundColor: preset.color }}
-                      />
-                      <span>{preset.name}</span>
-                      <span className="font-mono text-[9px] opacity-75">({preset.density})</span>
+                      PLA&apos;ya Sıfırla
                     </button>
-                  );
-                })}
+                  )}
+                </div>
+
+                <p className="text-[10px] text-gray-400 leading-tight">
+                  Malzemeniz listede yoksa, özel yoğunluk değerini (g/cm³) girerek kütleyi anında hesaplayabilirsiniz.
+                </p>
               </div>
             </div>
 

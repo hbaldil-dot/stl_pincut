@@ -9,7 +9,9 @@ export function VolumeMaterialModal({
   modelInfo,
   splitResult,
   showBoundingBox = false,
-  onToggleBoundingBox
+  onToggleBoundingBox,
+  modelScale = { x: 1, y: 1, z: 1 },
+  onResetScale
 }) {
   if (!isOpen) return null;
 
@@ -60,6 +62,8 @@ export function VolumeMaterialModal({
             isModal={true}
             showBoundingBox={showBoundingBox}
             onToggleBoundingBox={onToggleBoundingBox}
+            modelScale={modelScale}
+            onResetScale={onResetScale}
           />
         </div>
       </div>

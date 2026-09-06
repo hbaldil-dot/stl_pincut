@@ -13,7 +13,8 @@ export function BoundingBoxHelper({
   modelInfo,
   visible = true,
   color = '#06b6d4',
-  modelRotation
+  modelRotation,
+  modelScale
 }) {
   const aabbData = useMemo(() => {
     if (!visible) return null;
@@ -31,7 +32,12 @@ export function BoundingBoxHelper({
 
     // Fallback to modelInfo bounding box dimensions if mesh Box3 is not ready
     if (!hasValidBox && modelInfo?.dimensions) {
-      const { x, y, z } = modelInfo.dimensions;
+      const sx = modelScale?.x ?? 1;
+      const sy = modelScale?.y ?? 1;
+      const sz = modelScale?.z ?? 1;
+      const x = (modelInfo.dimensions.x || 0) * sx;
+      const y = (modelInfo.dimensions.y || 0) * sy;
+      const z = (modelInfo.dimensions.z || 0) * sz;
       box.min.set(-x / 2, -y / 2, -z / 2);
       box.max.set(x / 2, y / 2, z / 2);
       hasValidBox = true;
@@ -77,7 +83,7 @@ export function BoundingBoxHelper({
       corners,
       cornerRadius
     };
-  }, [model, modelInfo, visible, modelRotation]);
+  }, [model, modelInfo, visible, modelRotation, modelScale]);
 
   // Edges geometry for clean 12 wireframe box edges without triangulation diagonals
   const edgesGeometry = useMemo(() => {
