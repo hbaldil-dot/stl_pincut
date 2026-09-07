@@ -17,7 +17,10 @@ import {
   GitCompare,
   Plus,
   Download,
-  AlertCircle
+  AlertCircle,
+  Maximize2,
+  X,
+  Eye
 } from 'lucide-react';
 import {
   loadConfigHistory,
@@ -26,14 +29,32 @@ import {
   clearConfigHistory,
   calculateConfigDelta,
   downloadConfigComparisonCSV,
+  downloadSingleConfigCSV,
   downloadConfigComparisonJSON
 } from '../utils/configHistoryStorage.js';
+import WireframeThumbnail from './WireframeThumbnail.jsx';
+
+/**
+ * Returns a distinctive color code for a given material name
+ */
+export const getMaterialColor = (materialName) => {
+  const name = (materialName || '').toUpperCase();
+  if (name.includes('PLA')) return '#06b6d4'; // cyan
+  if (name.includes('ABS')) return '#f59e0b'; // amber
+  if (name.includes('PETG')) return '#10b981'; // emerald
+  if (name.includes('TPU') || name.includes('FLEX')) return '#a855f7'; // purple
+  if (name.includes('REÇİNE') || name.includes('RESIN')) return '#ec4899'; // pink
+  if (name.includes('NAYLON') || name.includes('NYLON')) return '#3b82f6'; // blue
+  if (name.includes('KARBON') || name.includes('CARBON')) return '#94a3b8'; // slate
+  if (name.includes('AHŞAP') || name.includes('WOOD')) return '#d97706'; // amber-orange
+  return '#818cf8'; // indigo default
+};
 
 /**
  * Configuration & Export History Log Component
  *
  * Tracks, displays, compares, and restores previously used model print configurations
- * (scale, material density, calculated mass, volume).
+ * (scale, material density, calculated mass, volume) with isometric wireframe preview thumbnails.
  */
 export default function ConfigurationHistoryLog({
   modelName = 'Model',
@@ -53,6 +74,9 @@ export default function ConfigurationHistoryLog({
   const [viewMode, setViewMode] = useState('cards'); // 'cards' | 'table'
   const [appliedId, setAppliedId] = useState(null);
   const [confirmClear, setConfirmClear] = useState(false);
+  const [previewEntry, setPreviewEntry] = useState(null);
+  const [csvExportFeedback, setCsvExportFeedback] = useState(false);
+  const [singleCsvFeedbackId, setSingleCsvFeedbackId] = useState(null);
 
   // Sync with localStorage and window custom events
   useEffect(() => {
@@ -113,12 +137,38 @@ export default function ConfigurationHistoryLog({
   // Delete a single record
   const handleDelete = (id) => {
     deleteConfigHistoryEntry(id);
+    if (previewEntry?.id === id) {
+      setPreviewEntry(null);
+    }
   };
 
   // Clear all records
   const handleClearAll = () => {
     clearConfigHistory();
     setConfirmClear(false);
+    setPreviewEntry(null);
+  };
+
+  // Handle exporting the current export history log as a CSV file
+  const handleExportAllCSV = () => {
+    const res = downloadConfigComparisonCSV(history, activeConfig);
+    if (res) {
+      setCsvExportFeedback(true);
+      setTimeout(() => setCsvExportFeedback(false), 2200);
+      // If history was empty, snapshot the active config into the history store
+      if (history.length === 0) {
+        handleSaveCurrentConfig('export_csv');
+      }
+    }
+  };
+
+  // Handle exporting a single historical configuration as a CSV file
+  const handleExportSingleCSV = (entry) => {
+    const res = downloadSingleConfigCSV(entry, activeConfig);
+    if (res) {
+      setSingleCsvFeedbackId(entry.id);
+      setTimeout(() => setSingleCsvFeedbackId(null), 2000);
+    }
   };
 
   return (
@@ -181,7 +231,36 @@ export default function ConfigurationHistoryLog({
             </button>
 
             {/* View Mode & Export Controls */}
-            <div className="flex items-center gap-1.5 ml-auto">
+            <div className="flex items-center gap-1.5 ml-auto flex-wrap">
+              {/* Export History CSV Button (Always accessible) */}
+              <button
+                type="button"
+                data-testid="export-history-csv-btn"
+                onClick={handleExportAllCSV}
+                className={`p-1.5 rounded-lg text-[10px] font-medium transition flex items-center gap-1.5 border shadow-sm ${
+                  csvExportFeedback
+                    ? 'bg-emerald-600 text-white border-emerald-400 shadow-emerald-950'
+                    : 'bg-emerald-950/40 hover:bg-emerald-900/50 text-emerald-300 hover:text-emerald-200 border-emerald-500/40'
+                }`}
+                title={
+                  history.length > 0
+                    ? `Tüm ${history.length} yapılandırma kaydını ve fark analizini CSV (Excel) olarak indir`
+                    : 'Mevcut model baskı ayarlarını ve hesaplanan kütleyi CSV olarak indir'
+                }
+              >
+                {csvExportFeedback ? (
+                  <>
+                    <Check className="w-3.5 h-3.5" />
+                    <span>CSV İndirildi!</span>
+                  </>
+                ) : (
+                  <>
+                    <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-400" />
+                    <span>CSV Dışa Aktar{history.length > 0 ? ` (${history.length})` : ''}</span>
+                  </>
+                )}
+              </button>
+
               {history.length > 0 && (
                 <>
                   {/* View Mode Toggle */}
@@ -209,17 +288,6 @@ export default function ConfigurationHistoryLog({
                       Tablo
                     </button>
                   </div>
-
-                  {/* Export CSV */}
-                  <button
-                    type="button"
-                    onClick={() => downloadConfigComparisonCSV(history, activeConfig)}
-                    className="p-1.5 bg-gray-900 hover:bg-gray-800 text-emerald-400 hover:text-emerald-300 border border-gray-800 rounded-lg text-[10px] font-medium transition flex items-center gap-1"
-                    title="Tüm kayıtları ve fark analizini CSV (Excel) olarak indir"
-                  >
-                    <FileSpreadsheet className="w-3.5 h-3.5" />
-                    <span className="hidden sm:inline">CSV</span>
-                  </button>
 
                   {/* Export JSON */}
                   <button
@@ -267,13 +335,31 @@ export default function ConfigurationHistoryLog({
           </div>
 
           {/* Active Model Baseline Summary Pill */}
-          <div className="bg-gray-950/80 p-2.5 rounded-lg border border-indigo-500/20 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-[11px]">
-            <div className="flex items-center gap-2">
-              <span className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse" />
-              <span className="font-semibold text-gray-200">Aktif Model Ayarı (Referans):</span>
+          <div className="bg-gray-950/80 p-2 rounded-lg border border-indigo-500/20 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 text-[11px]">
+            <div className="flex items-center gap-2.5 min-w-0">
+              <div className="shrink-0">
+                <WireframeThumbnail
+                  scale={activeConfig.scale}
+                  dimensions={activeConfig.dimensions}
+                  materialColor={getMaterialColor(activeConfig.materialName)}
+                  materialName={activeConfig.materialName}
+                  size={44}
+                  showScaleBadge={true}
+                  interactive={true}
+                />
+              </div>
+              <div className="min-w-0">
+                <div className="flex items-center gap-1.5">
+                  <span className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse shrink-0" />
+                  <span className="font-semibold text-gray-200 truncate">Aktif Model Referansı</span>
+                </div>
+                <div className="text-[9px] text-gray-400 font-mono truncate">
+                  {Math.round(activeConfig.dimensions?.x || 0)}×{Math.round(activeConfig.dimensions?.y || 0)}×{Math.round(activeConfig.dimensions?.z || 0)} mm
+                </div>
+              </div>
             </div>
 
-            <div className="flex items-center gap-2 font-mono flex-wrap text-[10px]">
+            <div className="flex items-center gap-1.5 font-mono flex-wrap text-[10px] shrink-0 justify-end">
               <span className="bg-gray-900 px-2 py-0.5 rounded border border-gray-800 text-gray-300">
                 Ölçek: {Math.round((activeConfig.scale.x ?? 1) * 100)}%
                 {(Math.abs((activeConfig.scale.x ?? 1) - (activeConfig.scale.y ?? 1)) > 0.005 ||
@@ -291,12 +377,20 @@ export default function ConfigurationHistoryLog({
 
           {/* History List or Comparison Table */}
           {history.length === 0 ? (
-            <div className="bg-gray-950/40 p-4 rounded-xl border border-dashed border-gray-800 text-center flex flex-col items-center justify-center gap-1.5">
+            <div className="bg-gray-950/40 p-4 rounded-xl border border-dashed border-gray-800 text-center flex flex-col items-center justify-center gap-2">
               <History className="w-6 h-6 text-gray-600" />
               <span className="text-xs font-semibold text-gray-300">Henüz Kaydedilmiş Yapılandırma Yok</span>
               <p className="text-[10px] text-gray-500 max-w-sm">
-                Farklı ölçek ve malzeme denemelerini kıyaslamak için &quot;Mevcut Ayarı Kaydet&quot; butonuna basabilir veya metrik raporunu dışa aktarabilirsiniz.
+                Farklı ölçek ve malzeme denemelerini kıyaslamak için &quot;Mevcut Ayarı Kaydet&quot; butonuna basabilir veya mevcut ayarları doğrudan CSV olarak indirebilirsiniz.
               </p>
+              <button
+                type="button"
+                onClick={handleExportAllCSV}
+                className="mt-1 px-3 py-1.5 bg-emerald-950/50 hover:bg-emerald-900/50 text-emerald-300 border border-emerald-500/40 rounded-lg text-xs font-semibold transition flex items-center gap-1.5 shadow-sm"
+              >
+                <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-400" />
+                <span>Mevcut Baskı Ayarlarını CSV İndir</span>
+              </button>
             </div>
           ) : viewMode === 'table' ? (
             /* Comparison Table View */
@@ -304,6 +398,7 @@ export default function ConfigurationHistoryLog({
               <table className="w-full text-left text-[10px] font-mono">
                 <thead className="bg-gray-900/90 text-gray-400 sticky top-0 border-b border-gray-800">
                   <tr>
+                    <th className="p-2 text-center w-12">Tel Kafes</th>
                     <th className="p-2">Zaman</th>
                     <th className="p-2">Ölçek (X,Y,Z)</th>
                     <th className="p-2">Malzeme & ρ</th>
@@ -317,6 +412,7 @@ export default function ConfigurationHistoryLog({
                   {history.map((entry) => {
                     const delta = calculateConfigDelta(entry, activeConfig);
                     const isApplied = appliedId === entry.id;
+                    const isSingleExported = singleCsvFeedbackId === entry.id;
 
                     return (
                       <tr
@@ -325,6 +421,24 @@ export default function ConfigurationHistoryLog({
                           delta?.isIdentical ? 'bg-indigo-950/20' : ''
                         }`}
                       >
+                        <td className="p-1.5 whitespace-nowrap text-center">
+                          <button
+                            type="button"
+                            onClick={() => setPreviewEntry(entry)}
+                            className="inline-block hover:scale-110 active:scale-95 transition-transform"
+                            title="Büyük tel kafes 3D önizlemesini aç"
+                          >
+                            <WireframeThumbnail
+                              scale={entry.scale}
+                              dimensions={entry.dimensions}
+                              materialColor={getMaterialColor(entry.material?.name)}
+                              materialName={entry.material?.name}
+                              size={38}
+                              showScaleBadge={true}
+                              interactive={false}
+                            />
+                          </button>
+                        </td>
                         <td className="p-2 whitespace-nowrap text-gray-400">
                           {entry.formattedTime}
                           <span className="block text-[8px] text-gray-600">{entry.formattedDate}</span>
@@ -355,8 +469,8 @@ export default function ConfigurationHistoryLog({
                             <span
                               className={`px-1.5 py-0.5 rounded font-bold ${
                                 delta.deltaMassG > 0
-                                  ? 'text-amber-400 bg-amber-950/50'
-                                  : 'text-emerald-400 bg-emerald-950/50'
+                                    ? 'text-amber-400 bg-amber-950/50'
+                                    : 'text-emerald-400 bg-emerald-950/50'
                               }`}
                             >
                               {delta.deltaMassG > 0 ? `+${delta.deltaMassG}` : `${delta.deltaMassG}`} g (
@@ -387,6 +501,18 @@ export default function ConfigurationHistoryLog({
                             )}
                             <button
                               type="button"
+                              onClick={() => handleExportSingleCSV(entry)}
+                              className={`p-1 rounded transition border ${
+                                isSingleExported
+                                  ? 'bg-emerald-600 text-white border-emerald-400'
+                                  : 'text-emerald-400 hover:text-emerald-300 bg-gray-900 hover:bg-emerald-950/50 border-gray-800'
+                              }`}
+                              title="Bu yapılandırmayı CSV olarak indir"
+                            >
+                              {isSingleExported ? <Check className="w-3 h-3" /> : <FileSpreadsheet className="w-3 h-3" />}
+                            </button>
+                            <button
+                              type="button"
                               onClick={() => handleDelete(entry.id)}
                               className="p-1 text-gray-500 hover:text-red-400 transition"
                               title="Kaydı sil"
@@ -402,11 +528,12 @@ export default function ConfigurationHistoryLog({
               </table>
             </div>
           ) : (
-            /* Card Comparison View */
-            <div className="flex flex-col gap-2 max-h-72 overflow-y-auto pr-0.5 no-scrollbar">
+            /* Card Comparison View with Wireframe Preview Thumbnails */
+            <div className="flex flex-col gap-2 max-h-80 overflow-y-auto pr-0.5 no-scrollbar">
               {history.map((entry, index) => {
                 const delta = calculateConfigDelta(entry, activeConfig);
                 const isApplied = appliedId === entry.id;
+                const matColor = getMaterialColor(entry.material?.name);
 
                 return (
                   <div
@@ -417,85 +544,114 @@ export default function ConfigurationHistoryLog({
                         : 'bg-gray-950/70 hover:bg-gray-900/80 border-gray-800'
                     }`}
                   >
-                    {/* Top Row: Meta info & Tag */}
-                    <div className="flex items-center justify-between text-[10px]">
-                      <div className="flex items-center gap-1.5">
-                        <span className="font-bold text-gray-300 font-mono">
-                          #{history.length - index}
-                        </span>
-                        <span className="text-gray-400">{entry.formattedTime}</span>
-                        <span className="text-gray-600 text-[9px]">{entry.formattedDate}</span>
-                        {entry.source?.startsWith('export') && (
-                          <span className="text-[8px] bg-cyan-950/70 text-cyan-400 border border-cyan-500/30 px-1 py-0.2 rounded font-mono">
-                            Dışa Aktarma
-                          </span>
-                        )}
+                    <div className="flex items-start gap-3">
+                      {/* Wireframe Preview Thumbnail */}
+                      <div className="shrink-0 pt-0.5">
+                        <button
+                          type="button"
+                          onClick={() => setPreviewEntry(entry)}
+                          className="group relative block rounded-lg overflow-hidden focus:outline-none focus:ring-2 focus:ring-indigo-500/50 hover:scale-105 active:scale-95 transition-transform"
+                          title="Tel kafes 3D önizlemesini büyütmek için tıklayın"
+                        >
+                          <WireframeThumbnail
+                            scale={entry.scale}
+                            dimensions={entry.dimensions}
+                            materialColor={matColor}
+                            materialName={entry.material?.name}
+                            size={64}
+                            showScaleBadge={true}
+                            interactive={true}
+                          />
+                          <div className="absolute inset-0 bg-indigo-600/0 group-hover:bg-indigo-600/20 flex items-center justify-center transition-colors pointer-events-none">
+                            <Maximize2 className="w-4 h-4 text-white opacity-0 group-hover:opacity-100 drop-shadow transition-opacity" />
+                          </div>
+                        </button>
                       </div>
 
-                      {/* Delta Mass Pill */}
-                      {delta?.isIdentical ? (
-                        <span className="text-[9px] font-bold text-indigo-300 bg-indigo-900/60 border border-indigo-500/40 px-1.5 py-0.2 rounded-full flex items-center gap-1">
-                          <span className="w-1.5 h-1.5 rounded-full bg-indigo-400" />
-                          Şu Anki Aktif Model
-                        </span>
-                      ) : delta ? (
-                        <div className="flex items-center gap-1">
-                          <span
-                            className={`text-[9px] font-mono font-bold px-1.5 py-0.2 rounded-md flex items-center gap-0.5 ${
-                              delta.deltaMassG > 0
-                                ? 'text-amber-400 bg-amber-950/60 border border-amber-500/30'
-                                : 'text-emerald-400 bg-emerald-950/60 border border-emerald-500/30'
-                            }`}
-                          >
-                            {delta.deltaMassG > 0 ? (
-                              <TrendingUp className="w-2.5 h-2.5" />
-                            ) : (
-                              <TrendingDown className="w-2.5 h-2.5" />
-                            )}
-                            <span>
-                              {delta.deltaMassG > 0 ? `+${delta.deltaMassG}` : `${delta.deltaMassG}`} g (
-                              {delta.deltaMassPercent > 0 ? `+${delta.deltaMassPercent}` : `${delta.deltaMassPercent}`}%)
+                      {/* Details Column */}
+                      <div className="flex-1 min-w-0 flex flex-col gap-1.5">
+                        {/* Top Row: Meta info & Delta Badge */}
+                        <div className="flex items-center justify-between text-[10px] flex-wrap gap-1">
+                          <div className="flex items-center gap-1.5">
+                            <span className="font-bold text-gray-300 font-mono">
+                              #{history.length - index}
                             </span>
-                          </span>
+                            <span className="text-gray-400">{entry.formattedTime}</span>
+                            <span className="text-gray-600 text-[9px]">{entry.formattedDate}</span>
+                            {entry.source?.startsWith('export') && (
+                              <span className="text-[8px] bg-cyan-950/70 text-cyan-400 border border-cyan-500/30 px-1 py-0.2 rounded font-mono">
+                                Dışa Aktarma
+                              </span>
+                            )}
+                          </div>
+
+                          {/* Delta Mass Pill */}
+                          {delta?.isIdentical ? (
+                            <span className="text-[9px] font-bold text-indigo-300 bg-indigo-900/60 border border-indigo-500/40 px-1.5 py-0.2 rounded-full flex items-center gap-1">
+                              <span className="w-1.5 h-1.5 rounded-full bg-indigo-400" />
+                              Aktif Model
+                            </span>
+                          ) : delta ? (
+                            <div className="flex items-center gap-1">
+                              <span
+                                className={`text-[9px] font-mono font-bold px-1.5 py-0.2 rounded-md flex items-center gap-0.5 ${
+                                  delta.deltaMassG > 0
+                                    ? 'text-amber-400 bg-amber-950/60 border border-amber-500/30'
+                                    : 'text-emerald-400 bg-emerald-950/60 border border-emerald-500/30'
+                                }`}
+                              >
+                                {delta.deltaMassG > 0 ? (
+                                  <TrendingUp className="w-2.5 h-2.5" />
+                                ) : (
+                                  <TrendingDown className="w-2.5 h-2.5" />
+                                )}
+                                <span>
+                                  {delta.deltaMassG > 0 ? `+${delta.deltaMassG}` : `${delta.deltaMassG}`} g (
+                                  {delta.deltaMassPercent > 0 ? `+${delta.deltaMassPercent}` : `${delta.deltaMassPercent}`}%)
+                                </span>
+                              </span>
+                            </div>
+                          ) : null}
                         </div>
-                      ) : null}
+
+                        {/* Middle Row: Comparison Metrics Badges */}
+                        <div className="grid grid-cols-3 gap-1.5 text-[10px] font-mono">
+                          {/* Scale */}
+                          <div className="bg-gray-900 p-1.5 rounded border border-gray-800">
+                            <span className="text-gray-500 block text-[8px] uppercase">Ölçek:</span>
+                            <div className="font-bold text-cyan-300 truncate">
+                              {entry.isUniform
+                                ? `${entry.scalePercent?.x}%`
+                                : `${entry.scalePercent?.x}% / ${entry.scalePercent?.y}% / ${entry.scalePercent?.z}%`}
+                            </div>
+                          </div>
+
+                          {/* Material & Density */}
+                          <div className="bg-gray-900 p-1.5 rounded border border-gray-800">
+                            <span className="text-gray-500 block text-[8px] uppercase">Malzeme:</span>
+                            <div className="font-bold text-amber-300 truncate">
+                              {entry.material?.name}{' '}
+                              <span className="text-gray-400 font-normal">({entry.material?.density})</span>
+                            </div>
+                          </div>
+
+                          {/* Calculated Mass */}
+                          <div className="bg-gray-900 p-1.5 rounded border border-gray-800">
+                            <span className="text-gray-500 block text-[8px] uppercase">Kütle:</span>
+                            <div className="font-bold text-emerald-300 truncate">
+                              {entry.massGrams} g{' '}
+                              <span className="text-[8px] text-gray-500 font-normal">({entry.volumeCm3} cm³)</span>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
                     </div>
 
-                    {/* Middle Row: Comparison Metrics Badges */}
-                    <div className="grid grid-cols-3 gap-1.5 text-[10px] font-mono">
-                      {/* Scale */}
-                      <div className="bg-gray-900 p-1.5 rounded border border-gray-800">
-                        <span className="text-gray-500 block text-[8px] uppercase">Ölçek:</span>
-                        <div className="font-bold text-cyan-300 truncate">
-                          {entry.isUniform
-                            ? `${entry.scalePercent?.x}%`
-                            : `${entry.scalePercent?.x}% / ${entry.scalePercent?.y}% / ${entry.scalePercent?.z}%`}
-                        </div>
-                      </div>
-
-                      {/* Material & Density */}
-                      <div className="bg-gray-900 p-1.5 rounded border border-gray-800">
-                        <span className="text-gray-500 block text-[8px] uppercase">Malzeme:</span>
-                        <div className="font-bold text-amber-300 truncate">
-                          {entry.material?.name}{' '}
-                          <span className="text-gray-400 font-normal">({entry.material?.density})</span>
-                        </div>
-                      </div>
-
-                      {/* Calculated Mass */}
-                      <div className="bg-gray-900 p-1.5 rounded border border-gray-800">
-                        <span className="text-gray-500 block text-[8px] uppercase">Hesaplanan Kütle:</span>
-                        <div className="font-bold text-emerald-300 truncate">
-                          {entry.massGrams} g{' '}
-                          <span className="text-[8px] text-gray-500 font-normal">({entry.volumeCm3} cm³)</span>
-                        </div>
-                      </div>
-                    </div>
-
-                    {/* Bottom Row: Action Buttons */}
-                    <div className="flex items-center justify-between pt-1 border-t border-gray-800/80 text-[10px]">
-                      <span className="text-[9px] text-gray-500 font-mono truncate mr-2">
-                        {entry.dimensions?.x}×{entry.dimensions?.y}×{entry.dimensions?.z} mm
+                    {/* Bottom Row: Dimensions & Action Buttons */}
+                    <div className="flex items-center justify-between pt-1.5 border-t border-gray-800/80 text-[10px]">
+                      <span className="text-[9px] text-gray-400 font-mono truncate mr-2 flex items-center gap-1">
+                        <Box className="w-3 h-3 text-cyan-400 inline shrink-0" />
+                        <span>Boyut: {Math.round(entry.dimensions?.x || 0)}×{Math.round(entry.dimensions?.y || 0)}×{Math.round(entry.dimensions?.z || 0)} mm</span>
                       </span>
 
                       <div className="flex items-center gap-1.5 shrink-0">
@@ -527,6 +683,24 @@ export default function ConfigurationHistoryLog({
                           </button>
                         )}
 
+                        {/* Quick CSV Export for this card */}
+                        <button
+                          type="button"
+                          onClick={() => handleExportSingleCSV(entry)}
+                          className={`p-1 rounded-md border transition ${
+                            singleCsvFeedbackId === entry.id
+                              ? 'bg-emerald-600 text-white border-emerald-400'
+                              : 'text-emerald-400 hover:text-emerald-300 bg-gray-900 hover:bg-emerald-950/50 border-gray-800 hover:border-emerald-500/40'
+                          }`}
+                          title="Bu yapılandırmanın baskı ayarlarını CSV olarak indir"
+                        >
+                          {singleCsvFeedbackId === entry.id ? (
+                            <Check className="w-3 h-3" />
+                          ) : (
+                            <FileSpreadsheet className="w-3 h-3" />
+                          )}
+                        </button>
+
                         <button
                           type="button"
                           onClick={() => handleDelete(entry.id)}
@@ -543,6 +717,128 @@ export default function ConfigurationHistoryLog({
             </div>
           )}
         </>
+      )}
+
+      {/* Enlarged Wireframe Configuration Preview Modal */}
+      {previewEntry && (
+        <div
+          className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4 animate-in fade-in duration-200"
+          onClick={() => setPreviewEntry(null)}
+        >
+          <div
+            className="bg-gray-950 border border-indigo-500/40 rounded-2xl p-5 max-w-md w-full shadow-2xl flex flex-col gap-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Modal Header */}
+            <div className="flex items-center justify-between border-b border-gray-800 pb-3">
+              <div className="flex items-center gap-2">
+                <div className="p-1.5 bg-indigo-500/20 text-indigo-400 rounded-lg border border-indigo-500/30">
+                  <Box className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-gray-100">
+                    3D Tel Kafes Yapılandırma Önizlemesi
+                  </h3>
+                  <p className="text-[10px] text-gray-400">
+                    {previewEntry.modelName} &bull; {previewEntry.formattedDate} {previewEntry.formattedTime}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setPreviewEntry(null)}
+                className="p-1.5 text-gray-400 hover:text-gray-100 bg-gray-900 hover:bg-gray-800 border border-gray-800 rounded-lg transition"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Large 3D Wireframe Thumbnail Centerpiece */}
+            <div className="bg-gray-900/90 p-4 rounded-xl border border-gray-800 flex flex-col items-center justify-center gap-2">
+              <WireframeThumbnail
+                scale={previewEntry.scale}
+                dimensions={previewEntry.dimensions}
+                materialColor={getMaterialColor(previewEntry.material?.name)}
+                materialName={previewEntry.material?.name}
+                size={160}
+                showScaleBadge={true}
+                interactive={true}
+              />
+              <span className="text-[10px] text-gray-400 font-mono text-center">
+                İzometrik tel kafes CAD projeksiyonu (Slicer katman ve üçgen yüzeyleri)
+              </span>
+            </div>
+
+            {/* Detailed Parameters Grid */}
+            <div className="grid grid-cols-2 gap-2 text-xs font-mono">
+              <div className="bg-gray-900/70 p-2.5 rounded-lg border border-gray-800">
+                <span className="text-[9px] text-gray-500 block uppercase font-sans">Ölçek Faktörleri:</span>
+                <span className="font-bold text-cyan-300">
+                  X: {Math.round((previewEntry.scale?.x ?? 1) * 100)}% &bull; Y: {Math.round((previewEntry.scale?.y ?? 1) * 100)}% &bull; Z: {Math.round((previewEntry.scale?.z ?? 1) * 100)}%
+                </span>
+              </div>
+              <div className="bg-gray-900/70 p-2.5 rounded-lg border border-gray-800">
+                <span className="text-[9px] text-gray-500 block uppercase font-sans">Model Boyutları:</span>
+                <span className="font-bold text-gray-200">
+                  {Math.round(previewEntry.dimensions?.x || 0)}×{Math.round(previewEntry.dimensions?.y || 0)}×{Math.round(previewEntry.dimensions?.z || 0)} mm
+                </span>
+              </div>
+              <div className="bg-gray-900/70 p-2.5 rounded-lg border border-gray-800">
+                <span className="text-[9px] text-gray-500 block uppercase font-sans">Malzeme & Yoğunluk:</span>
+                <span className="font-bold text-amber-300">
+                  {previewEntry.material?.name} ({previewEntry.material?.density} g/cm³)
+                </span>
+              </div>
+              <div className="bg-gray-900/70 p-2.5 rounded-lg border border-gray-800">
+                <span className="text-[9px] text-gray-500 block uppercase font-sans">Hesaplanan Kütle / Hacim:</span>
+                <span className="font-bold text-emerald-300">
+                  {previewEntry.massGrams} g &bull; {previewEntry.volumeCm3} cm³
+                </span>
+              </div>
+            </div>
+
+            {/* Modal Actions */}
+            <div className="flex items-center justify-between pt-2 border-t border-gray-800">
+              <span className="text-[10px] text-gray-500 font-mono">
+                Kayıt ID: {previewEntry.id?.slice?.(-8) || previewEntry.id}
+              </span>
+
+              <div className="flex items-center gap-2">
+                {/* Download CSV from preview */}
+                <button
+                  type="button"
+                  onClick={() => handleExportSingleCSV(previewEntry)}
+                  className="px-3 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-semibold transition flex items-center gap-1.5 shadow-md shadow-emerald-950/60"
+                  title="Bu yapılandırmanın baskı ayarlarını CSV olarak indir"
+                >
+                  <FileSpreadsheet className="w-3.5 h-3.5" />
+                  <span>CSV İndir</span>
+                </button>
+
+                {onApplyConfig && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      handleApply(previewEntry);
+                      setPreviewEntry(null);
+                    }}
+                    className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-semibold transition flex items-center gap-1.5 shadow-md shadow-indigo-950/60"
+                  >
+                    <RotateCcw className="w-3.5 h-3.5" />
+                    <span>Bu Ayarı Modele Uygula</span>
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setPreviewEntry(null)}
+                  className="px-3 py-2 bg-gray-900 hover:bg-gray-800 text-gray-300 rounded-lg text-xs font-medium transition border border-gray-800"
+                >
+                  Kapat
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

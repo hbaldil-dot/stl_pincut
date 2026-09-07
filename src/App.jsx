@@ -2124,6 +2124,7 @@ export function App() {
         showBoundingBox={showBoundingBox}
         onToggleBoundingBox={() => setShowBoundingBox((prev) => !prev)}
         modelScale={modelScale}
+        onScaleChange={handleModelScaleChange}
         onResetScale={handleResetScale}
         density={materialDensity}
         onChangeDensity={setMaterialDensity}

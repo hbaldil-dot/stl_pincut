@@ -31,6 +31,7 @@ import {
 } from '../utils/volumeCalculator';
 import { downloadMetricsFile } from '../utils/exportMetrics';
 import { getComplexityTier } from './PerformanceOverlay';
+import ConfigurationHistoryLog from './ConfigurationHistoryLog';
 
 const DENSITY_PRESETS = ALL_DENSITY_PRESETS;
 
@@ -42,6 +43,7 @@ export function ModelInspector({
   showBoundingBox = false,
   onToggleBoundingBox,
   modelScale = { x: 1, y: 1, z: 1 },
+  onScaleChange,
   onResetScale,
   model,
   density: propDensity,
@@ -912,6 +914,29 @@ export function ModelInspector({
               </button>
             </div>
           </div>
+
+          {/* Model Configuration & Export History Log with Wireframe Preview */}
+          <ConfigurationHistoryLog
+            modelName={info?.name || '3D Model'}
+            currentScale={modelScale}
+            currentDensity={numDensity}
+            currentMassGrams={massStats.massGrams}
+            currentVolumeCm3={volumeCm3}
+            currentDimensions={{
+              x: parseFloat(((info.dimensions?.x || 0) * (isScaled ? sx : 1)).toFixed(2)),
+              y: parseFloat(((info.dimensions?.y || 0) * (isScaled ? sy : 1)).toFixed(2)),
+              z: parseFloat(((info.dimensions?.z || 0) * (isScaled ? sz : 1)).toFixed(2))
+            }}
+            matchedMaterialName={matchedPreset?.name || (isCustomDensity ? 'Özel Yoğunluk' : 'PLA')}
+            onApplyConfig={(cfg) => {
+              if (cfg?.scale && onScaleChange) {
+                onScaleChange(cfg.scale);
+              }
+              if (cfg?.material?.density && onChangeDensity) {
+                onChangeDensity(cfg.material.density);
+              }
+            }}
+          />
 
           {/* 3D Printing Recommendation */}
           <div className="bg-emerald-950/30 border border-emerald-500/30 p-3 rounded-xl flex items-start gap-2.5 text-emerald-300">

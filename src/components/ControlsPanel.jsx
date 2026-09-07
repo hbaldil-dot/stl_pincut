@@ -45,7 +45,8 @@ import {
   Link,
   Unlink,
   Percent,
-  Edit3
+  Edit3,
+  FileSpreadsheet
 } from 'lucide-react';
 import { SAMPLE_PRESETS } from '../utils/sampleModels';
 import { MATERIAL_THEMES } from '../utils/stlLoaderHelper';
@@ -62,6 +63,8 @@ import { ExportConfigPanel } from './ExportConfigPanel';
 import { BatchQueueTab } from './BatchQueueTab';
 import { VolumeMaterialTool } from './VolumeMaterialTool';
 import { getComplexityTier } from './PerformanceOverlay';
+import ConfigurationHistoryLog from './ConfigurationHistoryLog';
+import { loadConfigHistory, downloadConfigComparisonCSV } from '../utils/configHistoryStorage';
 
 export function ControlsPanel({
   modelName,
@@ -3195,6 +3198,29 @@ export function ControlsPanel({
                 </span>
               </div>
             </div>
+
+            {/* Model Configuration & Export History Log with Wireframe Preview */}
+            <ConfigurationHistoryLog
+              modelName={modelInfo?.name || '3D Model'}
+              currentScale={modelScale}
+              currentDensity={effectiveDensity}
+              currentMassGrams={liveScaledStats.massGrams}
+              currentVolumeCm3={liveScaledStats.volumeCm3}
+              currentDimensions={{
+                x: liveScaledStats.dimX,
+                y: liveScaledStats.dimY,
+                z: liveScaledStats.dimZ
+              }}
+              matchedMaterialName={matchedPreset?.name || (isCustomDensity ? 'Özel Yoğunluk' : 'PLA')}
+              onApplyConfig={(cfg) => {
+                if (cfg?.scale && onModelScaleChange) {
+                  onModelScaleChange(cfg.scale);
+                }
+                if (cfg?.material?.density && onMaterialDensityChange) {
+                  onMaterialDensityChange(cfg.material.density);
+                }
+              }}
+            />
           </div>
         </div>
       )}
@@ -3402,6 +3428,33 @@ export function ControlsPanel({
           >
             <FolderArchive className="w-4 h-4" />
             Tüm Parçaları ZIP İndir [{exportConfig?.format?.toUpperCase() || 'BINARY'} • %{Math.round((exportConfig?.density || 1) * 100)}]
+          </button>
+
+          {/* CSV Print Settings & Export History Export */}
+          <button
+            onClick={() => {
+              const history = loadConfigHistory();
+              downloadConfigComparisonCSV(history, {
+                modelName: modelInfo?.name || '3D Model',
+                scale: modelScale,
+                density: effectiveDensity,
+                materialName: matchedPreset?.name || (isCustomDensity ? 'Özel Yoğunluk' : 'PLA'),
+                massGrams: liveScaledStats?.massGrams || 0,
+                volumeCm3: liveScaledStats?.volumeCm3 || 0,
+                dimensions: {
+                  x: liveScaledStats?.dimX || 0,
+                  y: liveScaledStats?.dimY || 0,
+                  z: liveScaledStats?.dimZ || 0
+                },
+                format: exportConfig?.format || 'binary',
+                meshDensity: exportConfig?.density || 1.0
+              });
+            }}
+            className="w-full py-2 px-3 bg-emerald-950/50 hover:bg-emerald-900/50 text-emerald-300 border border-emerald-500/40 rounded-xl text-xs font-semibold transition flex items-center justify-center gap-1.5 shadow-sm"
+            title="Tüm dilimleme, ölçek ve malzeme baskı ayarları geçmişini CSV (Excel) olarak indir"
+          >
+            <FileSpreadsheet className="w-4 h-4 text-emerald-400" />
+            <span>Baskı Ayarları ve Geçmişi CSV İndir</span>
           </button>
         </div>
       )}

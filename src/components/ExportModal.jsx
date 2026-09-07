@@ -14,7 +14,8 @@ import {
   HardDrive,
   Copy,
   Check,
-  CircleDot
+  CircleDot,
+  FileSpreadsheet
 } from 'lucide-react';
 import {
   calculateGeometryStats,
@@ -23,6 +24,7 @@ import {
   downloadAllPartsZip
 } from '../utils/stlExporter';
 import { ExportConfigPanel } from './ExportConfigPanel';
+import { loadConfigHistory, downloadConfigComparisonCSV } from '../utils/configHistoryStorage';
 
 export function ExportModal({
   isOpen,
@@ -44,6 +46,7 @@ export function ExportModal({
   const [customName, setCustomName] = useState(modelName || 'Modified_Model');
   const [copiedTip, setCopiedTip] = useState(false);
   const [isExportingZip, setIsExportingZip] = useState(false);
+  const [csvExported, setCsvExported] = useState(false);
 
   if (!isOpen) return null;
 
@@ -148,6 +151,26 @@ export function ExportModal({
     navigator.clipboard.writeText(tips);
     setCopiedTip(true);
     setTimeout(() => setCopiedTip(false), 2000);
+  };
+
+  const handleExportHistoryCSV = () => {
+    const history = loadConfigHistory();
+    const result = downloadConfigComparisonCSV(history, {
+      modelName: cleanName,
+      scale: { x: 1, y: 1, z: 1 },
+      density: 1.24,
+      volumeCm3: (statsA?.volumeCm3 || 0) + (statsB?.volumeCm3 || 0),
+      massGrams: ((statsA?.volumeCm3 || 0) + (statsB?.volumeCm3 || 0)) * 1.24,
+      format: exportFormat,
+      meshDensity: density
+    });
+    if (result) {
+      setCsvExported(true);
+      setTimeout(() => setCsvExported(false), 2200);
+      if (onNotify) {
+        onNotify(`Baskı ayarları geçmişi (${result.filename || 'print_settings.csv'}) başarıyla indirildi.`);
+      }
+    }
   };
 
   return (
@@ -358,6 +381,42 @@ export function ExportModal({
               </button>
             </div>
           )}
+
+          {/* Print Settings & Export History CSV Section */}
+          <div className="bg-emerald-950/20 border border-emerald-500/30 rounded-xl p-3 flex items-center justify-between gap-3 shadow-inner">
+            <div className="flex items-center gap-2.5 text-xs">
+              <div className="p-1.5 bg-emerald-500/20 text-emerald-400 rounded-lg border border-emerald-500/30 shrink-0">
+                <FileSpreadsheet className="w-4 h-4" />
+              </div>
+              <div>
+                <span className="font-semibold text-emerald-300 block">Baskı Ayarları ve Geçmiş Raporu (.CSV)</span>
+                <span className="text-[10px] text-gray-400">
+                  Model ölçeği, malzeme yoğunluğu, kütle hesabı ve dışa aktarma ayarlarını Excel/Google Sheets uyumlu CSV olarak indirin.
+                </span>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={handleExportHistoryCSV}
+              className={`py-1.5 px-3 rounded-lg text-xs font-semibold transition flex items-center gap-1.5 shrink-0 shadow-md ${
+                csvExported
+                  ? 'bg-emerald-600 text-white shadow-emerald-950/60 border border-emerald-400'
+                  : 'bg-emerald-700 hover:bg-emerald-600 text-white shadow-emerald-950/60'
+              }`}
+            >
+              {csvExported ? (
+                <>
+                  <Check className="w-3.5 h-3.5" />
+                  <span>CSV İndirildi!</span>
+                </>
+              ) : (
+                <>
+                  <FileSpreadsheet className="w-3.5 h-3.5" />
+                  <span>Geçmişi CSV İndir</span>
+                </>
+              )}
+            </button>
+          </div>
 
           {/* 3D Printing & Slicing Advice Box */}
           <div className="bg-gray-950/40 border border-gray-800 rounded-xl p-3 flex items-start justify-between text-xs text-gray-400 gap-2">

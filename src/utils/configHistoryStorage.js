@@ -105,7 +105,10 @@ export function addConfigHistoryEntry({
       y: parseFloat((Number(dimensions?.y) || 0).toFixed(1)),
       z: parseFloat((Number(dimensions?.z) || 0).toFixed(1))
     },
-    source, // 'manual', 'export_json', 'export_csv', etc.
+    exportFormat: (material?.exportFormat || source?.includes('ascii') ? 'ascii' : 'binary'),
+    meshDensity: typeof material?.meshDensity === 'number' ? material.meshDensity : 1.0,
+    infillPercent: typeof material?.infillPercent === 'number' ? material.infillPercent : null,
+    source, // 'manual', 'export_json', 'export_csv', 'export_stl', etc.
     notes: notes || ''
   };
 
@@ -198,70 +201,171 @@ export function calculateConfigDelta(historyEntry, currentConfig) {
 
 /**
  * Exports all configuration comparison records into a structured CSV document.
+ * Includes UTF-8 BOM (\uFEFF) for seamless compatibility with Microsoft Excel, Google Sheets, and LibreOffice.
  *
- * @param {Array<Object>} entries
- * @param {Object} [currentConfig]
+ * @param {Array<Object>} entries - List of history log records
+ * @param {Object} [currentConfig] - Active model configuration for delta calculations and fallback
+ * @returns {{success: boolean, filename: string, count: number}|boolean}
  */
 export function downloadConfigComparisonCSV(entries, currentConfig = null) {
-  if (!entries || entries.length === 0) return;
+  let list = Array.isArray(entries) && entries.length > 0 ? [...entries] : [];
 
-  const rows = [
-    [
-      'Tarih / Saat',
-      'Model Adi',
-      'Olcek X (%)',
-      'Olcek Y (%)',
-      'Olcek Z (%)',
-      'Esit Olcek (Uniform)',
-      'Malzeme Adi',
-      'Yogunluk (g/cm3)',
-      'Hacim (cm3)',
-      'Hesaplanan Kutle (g)',
-      'Hesaplanan Kutle (kg)',
-      'Boyut X (mm)',
-      'Boyut Y (mm)',
-      'Boyut Z (mm)',
-      'Kayit Kaynagi',
-      'Mevcut Ayara Gore Kutle Farki (g)',
-      'Mevcut Ayara Gore Kutle Farki (%)'
-    ]
+  // If list is empty but currentConfig is available, generate a baseline row so user can always export their current settings
+  if (list.length === 0 && currentConfig) {
+    const sx = Number(currentConfig.scale?.x ?? 1);
+    const sy = Number(currentConfig.scale?.y ?? 1);
+    const sz = Number(currentConfig.scale?.z ?? 1);
+    const now = new Date();
+    const safeDensity = Number(currentConfig.density) || 1.24;
+    const safeVol = Number(currentConfig.volumeCm3) || 0;
+    const safeMassG = Number(currentConfig.massGrams) || parseFloat((safeVol * safeDensity).toFixed(2));
+
+    list = [
+      {
+        id: `cfg_active_${Date.now()}`,
+        timestamp: now.toISOString(),
+        formattedDate: now.toLocaleDateString('tr-TR', { day: '2-digit', month: '2-digit', year: 'numeric' }),
+        formattedTime: now.toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+        modelName: currentConfig.modelName || 'Model',
+        scale: { x: sx, y: sy, z: sz },
+        scalePercent: { x: Math.round(sx * 100), y: Math.round(sy * 100), z: Math.round(sz * 100) },
+        isUniform: Math.abs(sx - sy) < 0.001 && Math.abs(sy - sz) < 0.001,
+        material: {
+          name: currentConfig.materialName || 'PLA',
+          density: safeDensity
+        },
+        volumeCm3: safeVol,
+        massGrams: safeMassG,
+        massKg: parseFloat((safeMassG / 1000).toFixed(4)),
+        dimensions: currentConfig.dimensions || { x: 0, y: 0, z: 0 },
+        exportFormat: currentConfig.format || 'binary',
+        meshDensity: typeof currentConfig.meshDensity === 'number' ? currentConfig.meshDensity : 1.0,
+        infillPercent: typeof currentConfig.infillPercent === 'number' ? currentConfig.infillPercent : 20,
+        source: 'active_print_settings',
+        notes: 'Aktif model konfigürasyonu ve baskı ayarları'
+      }
+    ];
+  }
+
+  if (list.length === 0) return false;
+
+  const headers = [
+    'Kayit No (Record ID)',
+    'Tarih (Date)',
+    'Saat (Time)',
+    'Model Adi (Model Name)',
+    'Olcek X (%)',
+    'Olcek Y (%)',
+    'Olcek Z (%)',
+    'Olcek Carpani (X,Y,Z)',
+    'Uniform Olcek (Uniform Scale)',
+    'Boyut X - Genislik (mm)',
+    'Boyut Y - Derinlik (mm)',
+    'Boyut Z - Yukseklik (mm)',
+    'Malzeme Adi (Material)',
+    'Malzeme Yogunlugu (g/cm3)',
+    'Kati Hacim (cm3)',
+    'Kati Hacim (mm3)',
+    'Hesaplanan Kutle (g)',
+    'Hesaplanan Kutle (kg)',
+    'Baski Formati (Export Format)',
+    'Mesh Detayi / Yogunlugu (%)',
+    'Dolgu Orani (Infill %)',
+    'Kayit Kaynagi / Islem (Source)',
+    'Aktif Modele Gore Kutle Farki (g)',
+    'Aktif Modele Gore Kutle Farki (%)',
+    'Aktif Modele Gore Hacim Farki (cm3)',
+    'Aktif Modele Gore Yogunluk Farki (g/cm3)',
+    'Zaman Damgasi (ISO Timestamp)',
+    'Notlar / Aciklama (Notes)'
   ];
 
-  entries.forEach((item) => {
+  const escapeCSV = (val) => {
+    if (val === null || val === undefined) return '""';
+    const str = String(val);
+    return `"${str.replace(/"/g, '""')}"`;
+  };
+
+  const rows = list.map((item, index) => {
     let deltaMassGStr = '-';
     let deltaMassPctStr = '-';
+    let deltaVolCm3Str = '-';
+    let deltaDensityStr = '-';
+
     if (currentConfig && currentConfig.massGrams) {
       const delta = calculateConfigDelta(item, currentConfig);
       if (delta) {
-        deltaMassGStr = (delta.deltaMassG > 0 ? `+${delta.deltaMassG}` : `${delta.deltaMassG}`);
-        deltaMassPctStr = (delta.deltaMassPercent > 0 ? `+${delta.deltaMassPercent}%` : `${delta.deltaMassPercent}%`);
+        deltaMassGStr = delta.deltaMassG > 0 ? `+${delta.deltaMassG}` : `${delta.deltaMassG}`;
+        deltaMassPctStr = delta.deltaMassPercent > 0 ? `+${delta.deltaMassPercent}%` : `${delta.deltaMassPercent}%`;
+        deltaVolCm3Str = delta.deltaVolCm3 > 0 ? `+${delta.deltaVolCm3}` : `${delta.deltaVolCm3}`;
+        deltaDensityStr = delta.deltaDensity > 0 ? `+${delta.deltaDensity}` : `${delta.deltaDensity}`;
       }
     }
 
-    rows.push([
-      `"${item.formattedDate} ${item.formattedTime}"`,
-      `"${(item.modelName || 'Model').replace(/"/g, '""')}"`,
-      item.scalePercent?.x ?? Math.round(item.scale.x * 100),
-      item.scalePercent?.y ?? Math.round(item.scale.y * 100),
-      item.scalePercent?.z ?? Math.round(item.scale.z * 100),
-      item.isUniform ? 'Evet' : 'Hayir',
-      `"${(item.material?.name || 'Ozel').replace(/"/g, '""')}"`,
-      item.material?.density ?? 1.24,
-      item.volumeCm3,
-      item.massGrams,
-      item.massKg,
+    const scaleFactorStr = `${item.scale?.x ?? 1}, ${item.scale?.y ?? 1}, ${item.scale?.z ?? 1}`;
+    const meshDensityPct = item.meshDensity ? `${Math.round(item.meshDensity * 100)}%` : '100%';
+    const infillStr = item.infillPercent !== null && item.infillPercent !== undefined ? `%${item.infillPercent}` : 'Standart (%20)';
+    const volMm3 = parseFloat(((item.volumeCm3 || 0) * 1000).toFixed(1));
+
+    return [
+      escapeCSV(item.id || `#${list.length - index}`),
+      escapeCSV(item.formattedDate || ''),
+      escapeCSV(item.formattedTime || ''),
+      escapeCSV(item.modelName || 'Model'),
+      item.scalePercent?.x ?? Math.round((item.scale?.x ?? 1) * 100),
+      item.scalePercent?.y ?? Math.round((item.scale?.y ?? 1) * 100),
+      item.scalePercent?.z ?? Math.round((item.scale?.z ?? 1) * 100),
+      escapeCSV(scaleFactorStr),
+      item.isUniform ? 'Evet (Uniform)' : 'Hayir (Non-uniform)',
       item.dimensions?.x ?? 0,
       item.dimensions?.y ?? 0,
       item.dimensions?.z ?? 0,
-      `"${item.source || 'manual'}"`,
-      deltaMassGStr,
-      deltaMassPctStr
-    ]);
+      escapeCSV(item.material?.name || 'Ozel Malzeme'),
+      item.material?.density ?? 1.24,
+      item.volumeCm3 ?? 0,
+      volMm3,
+      item.massGrams ?? 0,
+      item.massKg ?? 0,
+      escapeCSV((item.exportFormat || 'binary').toUpperCase()),
+      escapeCSV(meshDensityPct),
+      escapeCSV(infillStr),
+      escapeCSV(item.source || 'manual'),
+      escapeCSV(deltaMassGStr),
+      escapeCSV(deltaMassPctStr),
+      escapeCSV(deltaVolCm3Str),
+      escapeCSV(deltaDensityStr),
+      escapeCSV(item.timestamp || ''),
+      escapeCSV(item.notes || '')
+    ].join(',');
   });
 
-  const csvContent = rows.map((r) => r.join(',')).join('\r\n');
-  const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-  downloadBlob(blob, `model_configuration_comparison_${Date.now()}.csv`);
+  const headerRow = headers.map(escapeCSV).join(',');
+  const csvContent = [headerRow, ...rows].join('\r\n');
+
+  // Prepend UTF-8 BOM (\uFEFF) to guarantee correct multi-language display in Excel and Calc
+  const blob = new Blob(['\uFEFF' + csvContent], { type: 'text/csv;charset=utf-8;' });
+
+  const primaryName = list[0]?.modelName || currentConfig?.modelName || 'Model';
+  const cleanName = String(primaryName)
+    .replace(/\.[^/.]+$/, '')
+    .replace(/[^a-zA-Z0-9_\-]/g, '_');
+  const dateStamp = new Date().toISOString().slice(0, 10);
+  const filename = `${cleanName}_print_settings_history_${dateStamp}.csv`;
+
+  downloadBlob(blob, filename);
+  return { success: true, filename, count: list.length };
+}
+
+/**
+ * Exports a single configuration record to CSV file.
+ *
+ * @param {Object} entry
+ * @param {Object} [currentConfig]
+ * @returns {Object|boolean}
+ */
+export function downloadSingleConfigCSV(entry, currentConfig = null) {
+  if (!entry) return false;
+  return downloadConfigComparisonCSV([entry], currentConfig);
 }
 
 /**
