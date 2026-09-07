@@ -1,4 +1,5 @@
 import React, { useState, useMemo } from 'react';
+import * as THREE from 'three';
 import {
   Flame,
   RotateCw,
