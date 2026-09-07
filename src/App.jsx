@@ -49,8 +49,12 @@ import {
   History,
   Flame
 } from 'lucide-react';
+import { recordMountCheckpoint } from './components/ConsoleDiagnosticSummary.jsx';
 
 export function App() {
+  const renderCycleRef = useRef(0);
+  renderCycleRef.current++;
+
   // Model state
   const [model, setModel] = useState(null);
   const [modelName, setModelName] = useState('Stanford Bunny');
@@ -58,6 +62,13 @@ export function App() {
   const [faceCount, setFaceCount] = useState(0);
   const [isLoadingFile, setIsLoadingFile] = useState(false);
   const [statusMessage, setStatusMessage] = useState('Stanford Bunny yüklendi.');
+
+  console.log(`%c[STL PinCut 3D] [Lifecycle: App] Render #${renderCycleRef.current}`, 'color: #38bdf8;', {
+    hasModel: !!model,
+    modelName,
+    isLoadingFile,
+    statusMessage
+  });
 
   // Modes: 'plane' (interactive clipping plane) | 'lasso' (freeform curve)
   const [activeMode, setActiveMode] = useState('plane');
@@ -393,10 +404,43 @@ export function App() {
     setStatusMessage('İşlem geçmişi temizlendi.');
   };
 
-  // Load initial preset
+  // Load initial preset and lifecycle monitoring
   useEffect(() => {
+    recordMountCheckpoint('REACT', 'App', 'App root component mounted');
+    console.log('%c[STL PinCut 3D] [Lifecycle: App] Component Did Mount into DOM successfully.', 'color: #10b981; font-weight: bold;');
     loadPresetModel('bunny', 'Stanford Bunny');
+    return () => {
+      console.log('%c[STL PinCut 3D] [Lifecycle: App] Component Will Unmount from DOM.', 'color: #f87171; font-weight: bold;');
+    };
   }, []);
+
+  // Track model state changes in React lifecycle
+  useEffect(() => {
+    if (model) {
+      console.log('%c[STL PinCut 3D] [Lifecycle: App] Model State Transition (Updated):', 'color: #a855f7; font-weight: bold;', {
+        name: modelName,
+        faces: faceCount,
+        hasGeometry: !!model.geometry,
+        dimensions: modelInfo?.dimensions,
+        boundingBox: modelInfo?.boundingBox
+      });
+    } else {
+      console.log('%c[STL PinCut 3D] [Lifecycle: App] Model State Transition: Cleared to null.', 'color: #64748b;');
+    }
+  }, [model]);
+
+  // Track split result lifecycle
+  useEffect(() => {
+    if (splitResult) {
+      console.log('%c[STL PinCut 3D] [Lifecycle: App] Split Result Created:', 'color: #10b981; font-weight: bold;', {
+        hasPartA: !!splitResult.partA,
+        hasPartB: !!splitResult.partB,
+        planeNormal: splitResult.normal,
+        planeCenter: splitResult.center,
+        hasDowelPin: !!splitResult.dowelPinGeometry
+      });
+    }
+  }, [splitResult]);
 
   // Update plane normal whenever axis, custom rotation, offset, or toggles change
   const handleClippingConfigChange = (changes, isContinuous = false) => {
@@ -932,6 +976,7 @@ export function App() {
    * Loads preset sample 3D model
    */
   const loadPresetModel = (presetId, name) => {
+    console.group(`%c[STL PinCut 3D] [Lifecycle: Model Loading] START: "${name}" (${presetId})`, 'color: #fbbf24; font-weight: bold;');
     setIsLoadingFile(true);
     setStatusMessage(`${name} yükleniyor...`);
     setSplitResult(null);
@@ -940,7 +985,14 @@ export function App() {
     handleClearMeasurement();
 
     try {
+      console.log('[STL PinCut 3D] Generating preset geometry for:', presetId);
       const { mesh, info } = loadSamplePreset(presetId);
+      console.log('[STL PinCut 3D] Preset geometry generated successfully:', {
+        triangles: info.triangles,
+        dimensions: info.dimensions,
+        volumeCm3: info.volumeCm3
+      });
+
       mesh.material = createMaterialForTheme(materialTheme, isWireframe);
 
       setModel(mesh);
@@ -972,11 +1024,14 @@ export function App() {
       }
 
       setStatusMessage(`${name} hazır.`);
+      recordMountCheckpoint('MODEL', name, `${info.triangles} triangles loaded`);
+      console.log(`%c[STL PinCut 3D] [Lifecycle: Model Loading] SUCCESS: "${name}" is loaded and ready.`, 'color: #10b981; font-weight: bold;');
     } catch (err) {
-      console.error(err);
+      console.error('%c[STL PinCut 3D] [Lifecycle: Model Loading] ERROR: Failed to load preset:', 'color: #ef4444; font-weight: bold;', err);
       setStatusMessage('Model yükleme hatası.');
     } finally {
       setIsLoadingFile(false);
+      console.groupEnd();
     }
   };
 

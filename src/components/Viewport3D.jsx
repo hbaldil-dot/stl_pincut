@@ -31,13 +31,85 @@ import {
   Flame,
   Activity,
   Scale,
-  Box
+  Box,
+  AlertTriangle,
+  Cpu
 } from 'lucide-react';
 import { PrintBedHelper } from './PrintBedHelper';
 import { BoundingBoxHelper } from './BoundingBoxHelper';
 import { OverhangLegendOverlay } from './OverhangLegendOverlay';
 import { PerformanceMonitor } from './PerformanceMonitor';
 import { PerformanceOverlay } from './PerformanceOverlay';
+import { recordMountCheckpoint } from './ConsoleDiagnosticSummary.jsx';
+import { checkHardwareAcceleration } from '../utils/hardwareAccelerationCheck.js';
+
+/**
+ * Three.js WebGLRenderer factory with explicit WebGL 2 rendering context acquisition.
+ */
+export function createExplicitWebGL2Renderer(canvas, customOptions = {}) {
+  const contextAttributes = {
+    alpha: true,
+    antialias: true,
+    powerPreference: 'high-performance',
+    preserveDrawingBuffer: true,
+    stencil: true,
+    depth: true,
+    failIfMajorPerformanceCaveat: false
+  };
+
+  let glContext = null;
+
+  // 1. Explicitly request WebGL 2 rendering context
+  try {
+    glContext = canvas.getContext('webgl2', contextAttributes);
+    if (glContext) {
+      console.log('%c[Three.js Init] Explicit WebGL 2 context acquired and bound.', 'color: #10b981; font-weight: bold;');
+    }
+  } catch (e) {
+    console.warn('[Three.js Init] WebGL 2 acquisition failed, falling back:', e);
+  }
+
+  // 2. Fallback to WebGL 1 if WebGL 2 is not available
+  if (!glContext) {
+    try {
+      glContext = canvas.getContext('webgl', contextAttributes) ||
+                  canvas.getContext('experimental-webgl', contextAttributes);
+      if (glContext) {
+        console.warn('[Three.js Init] WebGL 2 unavailable. Fallback to WebGL 1 context.');
+      }
+    } catch (e) {
+      console.error('[Three.js Init] WebGL fallback failed:', e);
+    }
+  }
+
+  // 3. Create WebGLRenderer with explicit context
+  let renderer;
+  try {
+    renderer = new THREE.WebGLRenderer({
+      canvas,
+      context: glContext || undefined,
+      powerPreference: 'high-performance',
+      antialias: true,
+      alpha: true,
+      preserveDrawingBuffer: true,
+      ...customOptions
+    });
+  } catch (err) {
+    console.warn('[Three.js Init] WebGLRenderer instantiation with explicit context failed, using standard parameters:', err);
+    renderer = new THREE.WebGLRenderer({
+      canvas,
+      powerPreference: 'high-performance',
+      antialias: true,
+      alpha: true,
+      preserveDrawingBuffer: true,
+      ...customOptions
+    });
+  }
+
+  renderer.localClippingEnabled = true;
+  renderer.outputColorSpace = THREE.SRGBColorSpace;
+  return renderer;
+}
 
 /**
  * Inner Rotatable Model Mesh with Three.js TransformControls rotation rings
@@ -218,6 +290,62 @@ function SceneController({
 }
 
 /**
+ * Diagnostic logger for Three.js Scene and Canvas lifecycle
+ */
+function ThreeSceneLifecycleTracker({ model, splitResult }) {
+  const { gl, scene, camera, size } = useThree();
+  const hasInitializedRef = useRef(false);
+
+  useEffect(() => {
+    if (!hasInitializedRef.current && gl) {
+      hasInitializedRef.current = true;
+      console.group('%c[STL PinCut 3D] [Lifecycle: Three.js Scene] Initialization Successful', 'color: #06b6d4; font-weight: bold;');
+      console.log('Renderer Info:', {
+        type: gl.constructor.name,
+        localClippingEnabled: gl.localClippingEnabled,
+        pixelRatio: gl.getPixelRatio ? gl.getPixelRatio() : 1,
+        viewportSize: `${size.width}x${size.height}px`
+      });
+      console.log('Active Camera:', {
+        type: camera?.type || camera?.constructor?.name,
+        fov: camera?.fov,
+        position: camera?.position ? [camera.position.x, camera.position.y, camera.position.z] : null
+      });
+      console.log('Scene Child Count:', scene?.children?.length);
+      console.groupEnd();
+
+      recordMountCheckpoint('THREE', 'SceneReady', `Active with ${scene?.children?.length || 0} objects`);
+
+      if (typeof window !== 'undefined' && window.__STL_DIAGNOSTICS__) {
+        window.__STL_DIAGNOSTICS__.log('STAGE_8_SCENE_READY', `3D Sahne, Kamera ve Işıklar aktif (${size.width}x${size.height}px).`, {
+          childCount: scene?.children?.length,
+          cameraFov: camera?.fov
+        });
+
+        // Track first WebGL frame render
+        if (typeof requestAnimationFrame !== 'undefined') {
+          requestAnimationFrame(() => {
+            recordMountCheckpoint('THREE', 'FirstFrame', 'First WebGL frame drawn to screen');
+            window.__STL_DIAGNOSTICS__?.log('STAGE_9_FIRST_FRAME', 'İlk 3D WebGL karesi GPU tarafından ekrana çizildi.');
+          });
+        }
+      }
+    }
+  }, [gl, scene, camera, size]);
+
+  useEffect(() => {
+    console.log('%c[STL PinCut 3D] [Lifecycle: Three.js Scene] Meshes in Scene Updated:', 'color: #38bdf8;', {
+      hasPrimaryModel: !!model,
+      primaryModelType: model?.type,
+      hasSplitParts: !!splitResult,
+      totalSceneObjects: scene?.children?.length
+    });
+  }, [model, splitResult, scene]);
+
+  return null;
+}
+
+/**
  * Main 3D Viewport with Three.js STL loading, interactive Clipping Plane, Lasso Slicing, and Precision Caliper Measurement Tool.
  */
 export function Viewport3D({
@@ -299,6 +427,38 @@ export function Viewport3D({
   const [performanceStats, setPerformanceStats] = useState(null);
   const [internalIsCrossSectionOpen, setInternalIsCrossSectionOpen] = useState(false);
   const canvasContainerRef = useRef();
+
+  // Browser Hardware Acceleration & WebGL Context Status Check
+  const [hwStatus, setHwStatus] = useState(() => checkHardwareAcceleration());
+  const [bypassHwWarning, setBypassHwWarning] = useState(false);
+
+  const handleRecheckHw = () => {
+    const freshStatus = checkHardwareAcceleration();
+    setHwStatus(freshStatus);
+    if (freshStatus.isHardwareAccelerated) {
+      setBypassHwWarning(false);
+    }
+  };
+
+  const viewportRenderRef = useRef(0);
+  viewportRenderRef.current++;
+
+  console.log(`%c[STL PinCut 3D] [Lifecycle: Viewport3D] Render #${viewportRenderRef.current}`, 'color: #0284c7;', {
+    hasModel: !!model,
+    modelType: model?.type,
+    activeMode,
+    isMeasureActive,
+    isHeatmapActive,
+    showGrid
+  });
+
+  useEffect(() => {
+    recordMountCheckpoint('REACT', 'Viewport3D', '3D Viewport container mounted');
+    console.log('%c[STL PinCut 3D] [Lifecycle: Viewport3D] Component Did Mount into DOM.', 'color: #059669; font-weight: bold;');
+    return () => {
+      console.log('%c[STL PinCut 3D] [Lifecycle: Viewport3D] Component Will Unmount from DOM.', 'color: #dc2626;');
+    };
+  }, []);
 
   const isCrossSectionHUDOpen = externalIsCrossSectionOpen !== undefined ? externalIsCrossSectionOpen : internalIsCrossSectionOpen;
   const handleToggleCrossSectionHUD = externalToggleCrossSectionHUD || (() => setInternalIsCrossSectionOpen((prev) => !prev));
@@ -1190,16 +1350,121 @@ export function Viewport3D({
         onResetOffset={() => onClippingConfigChange?.({ offset: 0 }, false)}
       />
 
-      {/* 3D Canvas */}
-      <Canvas
-        camera={{ position: [0, 15, 120], fov: 48 }}
-        gl={{
-          antialias: true,
-          alpha: true,
-          preserveDrawingBuffer: true,
-          localClippingEnabled: true
-        }}
-      >
+      {/* Fallback if WebGL context is completely unsupported or blocked */}
+      {!hwStatus.isSupported ? (
+        <div className="w-full h-full flex flex-col items-center justify-center bg-slate-950 p-6 text-center text-white select-none">
+          <div className="w-16 h-16 rounded-2xl bg-red-500/10 border border-red-500/30 flex items-center justify-center mb-4 text-red-400">
+            <AlertTriangle className="w-8 h-8" />
+          </div>
+          <h2 className="text-xl font-bold text-white mb-2">WebGL Grafik Bağlamı Başlatılamadı</h2>
+          <p className="text-sm text-slate-400 max-w-md mb-4 leading-relaxed">
+            Tarayıcınızda WebGL desteği etkinleştirilmemiş veya donanım hızlandırması tamamen kapatılmış.
+          </p>
+
+          {hwStatus.instructions && (
+            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 max-w-md w-full text-left mb-5">
+              <div className="text-xs font-semibold text-sky-400 mb-2 flex items-center gap-1.5">
+                <span>{hwStatus.instructions.browser} Donanım İvmesini Açma:</span>
+              </div>
+              <ol className="list-decimal list-inside space-y-1.5 text-xs text-slate-300">
+                {hwStatus.instructions.steps.map((step, idx) => (
+                  <li key={idx} className="leading-relaxed">{step}</li>
+                ))}
+              </ol>
+            </div>
+          )}
+
+          <button
+            onClick={handleRecheckHw}
+            className="py-2.5 px-5 bg-sky-600 hover:bg-sky-500 text-white rounded-xl text-xs font-semibold flex items-center gap-2 shadow-lg transition cursor-pointer"
+          >
+            <RotateCw className="w-4 h-4" />
+            Tekrar Denetle
+          </button>
+        </div>
+      ) : (
+        <>
+          {/* Hardware Acceleration Advisory Banner if hardware acceleration is disabled */}
+          {!hwStatus.isHardwareAccelerated && !bypassHwWarning && (
+            <div className="absolute inset-0 z-40 flex items-center justify-center bg-slate-950/85 backdrop-blur-md p-6">
+              <div className="max-w-lg w-full bg-slate-900 border border-amber-500/40 rounded-2xl p-6 shadow-2xl text-left">
+                <div className="flex items-center gap-3 mb-3">
+                  <div className="w-10 h-10 rounded-xl bg-amber-500/20 border border-amber-500/40 flex items-center justify-center text-amber-400 shrink-0">
+                    <AlertTriangle className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h3 className="text-base font-bold text-white">Donanım Hızlandırması Devre Dışı</h3>
+                    <p className="text-xs text-amber-400 font-medium">Yazılımsal CPU Rasterizer Algılandı</p>
+                  </div>
+                </div>
+
+                <div className="bg-slate-950/70 rounded-lg p-2.5 border border-slate-800 mb-3 text-xs font-mono flex items-center justify-between">
+                  <span className="text-slate-400">Algılanan Grafik Birimi:</span>
+                  <span className="text-amber-300 font-semibold truncate max-w-[280px]">
+                    {hwStatus.unmaskedRenderer || hwStatus.renderer || 'Yazılımsal Emülasyon'}
+                  </span>
+                </div>
+
+                <p className="text-xs text-slate-300 mb-4 leading-relaxed">
+                  Tarayıcınızda grafik donanım ivmesi (Hardware Acceleration) kapalı olduğu için 3D STL modelleri ekran kartınız yerine işlemci (CPU) üzerinde işlenecektir. Yüksek performans için donanım ivmesini açabilirsiniz.
+                </p>
+
+                {hwStatus.instructions && (
+                  <div className="bg-slate-950/80 rounded-xl p-3 border border-slate-800 mb-5 text-xs">
+                    <div className="font-semibold text-sky-400 mb-1.5 flex items-center gap-1.5">
+                      <span>{hwStatus.instructions.browser} için Etkinleştirme:</span>
+                    </div>
+                    <ol className="list-decimal list-inside space-y-1 text-slate-300">
+                      {hwStatus.instructions.steps.map((step, idx) => (
+                        <li key={idx} className="leading-snug">{step}</li>
+                      ))}
+                    </ol>
+                  </div>
+                )}
+
+                <div className="flex items-center justify-end gap-3 pt-1">
+                  <button
+                    onClick={handleRecheckHw}
+                    className="py-2 px-4 bg-sky-600 hover:bg-sky-500 text-white rounded-xl text-xs font-semibold flex items-center gap-1.5 transition cursor-pointer"
+                  >
+                    <RotateCw className="w-3.5 h-3.5" />
+                    Tekrar Denetle
+                  </button>
+                  <button
+                    onClick={() => setBypassHwWarning(true)}
+                    className="py-2 px-4 bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white rounded-xl text-xs font-semibold transition cursor-pointer"
+                  >
+                    Yine de Devam Et (Yazılımsal Mod)
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* 3D Canvas */}
+          <Canvas
+            camera={{ position: [0, 15, 120], fov: 48 }}
+            gl={(canvas) => createExplicitWebGL2Renderer(canvas)}
+            onCreated={({ gl, scene, camera }) => {
+              recordMountCheckpoint('THREE', 'Canvas.onCreated', `WebGLRenderer (${gl?.constructor?.name || 'GL'}, WebGL2: ${gl?.capabilities?.isWebGL2 ?? true}) initialized`);
+              console.log('%c[STL PinCut 3D] [Lifecycle: Three.js Canvas] onCreated Callback Fired:', 'color: #10b981; font-weight: bold;', {
+                glAvailable: !!gl,
+                sceneAvailable: !!scene,
+                cameraAvailable: !!camera,
+                isWebGL2: gl?.capabilities?.isWebGL2
+              });
+              if (typeof window !== 'undefined' && window.__STL_DIAGNOSTICS__) {
+                window.__STL_DIAGNOSTICS__.log('STAGE_7_CANVAS_INIT', 'R3F Canvas WebGLRenderer ve Three.js motoru başlatıldı.', {
+                  renderer: gl?.constructor?.name,
+                  isWebGL2: gl?.capabilities?.isWebGL2,
+                  localClippingEnabled: gl?.localClippingEnabled
+                });
+              }
+            }}
+          >
+        {/* Three.js Scene and Canvas Diagnostics */}
+        <ThreeSceneLifecycleTracker model={model} splitResult={splitResult} />
+
         {/* Scene Lighting Setup */}
         <ambientLight intensity={0.85} />
         <directionalLight position={[30, 45, 40]} intensity={1.5} castShadow />
@@ -1412,6 +1677,8 @@ export function Viewport3D({
           zoomSpeed={1.0}
         />
       </Canvas>
+        </>
+      )}
 
       {/* Real-time Triangle Count and FPS Performance Overlay */}
       <PerformanceOverlay
