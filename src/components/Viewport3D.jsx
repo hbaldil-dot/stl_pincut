@@ -3,6 +3,8 @@ import * as THREE from 'three';
 import { Canvas, useThree } from '@react-three/fiber';
 import { OrbitControls, GizmoHelper, GizmoViewport, TransformControls } from '@react-three/drei';
 import { LassoDrawer } from './LassoDrawer';
+import { SelectedFacesHighlight } from './SelectedFacesHighlight';
+import { LassoSelectionHUD } from './LassoSelectionHUD';
 import { PinGizmo } from './PinGizmo';
 import { ClippingPlaneHelper } from './ClippingPlaneHelper';
 import { MeasureTool } from './MeasureTool';
@@ -42,6 +44,7 @@ import { PerformanceMonitor } from './PerformanceMonitor';
 import { PerformanceOverlay } from './PerformanceOverlay';
 import { recordMountCheckpoint } from './ConsoleDiagnosticSummary.jsx';
 import { checkHardwareAcceleration } from '../utils/hardwareAccelerationCheck.js';
+import { useUnit, UnitToggle } from '../context/UnitContext.jsx';
 
 /**
  * Three.js WebGLRenderer factory with explicit WebGL 2 rendering context acquisition.
@@ -367,6 +370,23 @@ export function Viewport3D({
   onPinConfigChange,
   isShiftPressed,
   controlsRef,
+  // Raycaster Lasso Face & Vertex Selection props
+  selectedFaces = [],
+  selectedVertices = [],
+  lassoSelectionStats = { faceCount: 0, vertexCount: 0, surfaceArea: 0 },
+  onSelectFaces,
+  onClearFaceSelection,
+  onInvertFaceSelection,
+  onSelectAllFaces,
+  onDeleteSelectedFaces,
+  onAlignPlaneToSelection,
+  lassoFrontFacingOnly = true,
+  onToggleFrontFacing,
+  lassoSelectionMode = 'replace',
+  onChangeSelectionMode,
+  onToggleDrawing,
+  onClearDrawing,
+  onExecuteLassoSplit,
   materialTheme,
   showGrid = true,
   showBoundingBox = false,
@@ -407,6 +427,7 @@ export function Viewport3D({
   onChangeHeatmapConfig,
   overhangStats,
   onOpenOverhangTab,
+  onOpenOrientationModal,
   // Batch processing props
   onMultipleFilesDrop,
   onOpenBatchModal,
@@ -427,6 +448,7 @@ export function Viewport3D({
   const [performanceStats, setPerformanceStats] = useState(null);
   const [internalIsCrossSectionOpen, setInternalIsCrossSectionOpen] = useState(false);
   const canvasContainerRef = useRef();
+  const { unit, formatLength, formatValue, isImperial } = useUnit();
 
   // Browser Hardware Acceleration & WebGL Context Status Check
   const [hwStatus, setHwStatus] = useState(() => checkHardwareAcceleration());
@@ -482,7 +504,7 @@ export function Viewport3D({
   // Copy measurement to clipboard
   const handleCopyMeasurement = () => {
     if (!measuredDistance) return;
-    const text = `${measuredDistance.toFixed(2)} mm (ΔX: ${deltaCoords.dx.toFixed(2)}mm, ΔY: ${deltaCoords.dy.toFixed(2)}mm, ΔZ: ${deltaCoords.dz.toFixed(2)}mm)`;
+    const text = `${formatLength(measuredDistance, isImperial ? 3 : 2)} (ΔX: ${formatLength(deltaCoords.dx, isImperial ? 3 : 2)}, ΔY: ${formatLength(deltaCoords.dy, isImperial ? 3 : 2)}, ΔZ: ${formatLength(deltaCoords.dz, isImperial ? 3 : 2)})`;
     navigator.clipboard?.writeText(text);
     setIsCopied(true);
     setTimeout(() => setIsCopied(false), 2000);
@@ -677,7 +699,7 @@ export function Viewport3D({
           title={isMeasureActive ? 'Ölçüm Modunu Kapat' : 'Ölçüm Modunu Aç (2 Nokta Arası mm Mesafe Ölç)'}
         >
           <Ruler className="w-3.5 h-3.5" />
-          <span>Ölçüm (mm)</span>
+          <span>Ölçüm ({unit})</span>
           {isMeasureActive && <span className="w-2 h-2 rounded-full bg-cyan-300 animate-ping" />}
         </button>
 
@@ -1167,14 +1189,17 @@ export function Viewport3D({
               <Ruler className="w-4 h-4 text-cyan-400" />
               <span>Hassas STL 3D Cetvel</span>
             </div>
-            <button
-              onClick={onClearMeasurement}
-              className="text-[10px] text-gray-400 hover:text-red-300 bg-gray-800 hover:bg-gray-700 px-2 py-0.5 rounded transition flex items-center gap-1"
-              title="Ölçüm Noktalarını Sıfırla"
-            >
-              <RotateCcw className="w-3 h-3" />
-              <span>Sıfırla</span>
-            </button>
+            <div className="flex items-center gap-1.5">
+              <UnitToggle size="xs" />
+              <button
+                onClick={onClearMeasurement}
+                className="text-[10px] text-gray-400 hover:text-red-300 bg-gray-800 hover:bg-gray-700 px-2 py-0.5 rounded transition flex items-center gap-1"
+                title="Ölçüm Noktalarını Sıfırla"
+              >
+                <RotateCcw className="w-3 h-3" />
+                <span>Sıfırla</span>
+              </button>
+            </div>
           </div>
 
           {/* Status & Guidance Indicator */}
@@ -1200,20 +1225,20 @@ export function Viewport3D({
                   <span className="text-[10px] text-emerald-300/80 font-mono">Euclidean</span>
                 </div>
                 <div className="text-xl font-mono font-bold text-white flex items-baseline gap-1 my-0.5">
-                  <span className="text-emerald-300">{measuredDistance?.toFixed(2)}</span>
-                  <span className="text-xs text-gray-400 font-normal">mm</span>
+                  <span className="text-emerald-300">{formatValue(measuredDistance, isImperial ? 3 : 2)}</span>
+                  <span className="text-xs text-cyan-400 font-semibold">{unit}</span>
                 </div>
 
                 {deltaCoords && (
                   <div className="grid grid-cols-3 gap-1 pt-1.5 border-t border-emerald-900/60 text-[10px] font-mono text-gray-300">
                     <div>
-                      <span className="text-red-400 font-bold">ΔX:</span> {deltaCoords.dx.toFixed(1)}
+                      <span className="text-red-400 font-bold">ΔX:</span> {formatValue(deltaCoords.dx, isImperial ? 3 : 1)}
                     </div>
                     <div>
-                      <span className="text-green-400 font-bold">ΔY:</span> {deltaCoords.dy.toFixed(1)}
+                      <span className="text-green-400 font-bold">ΔY:</span> {formatValue(deltaCoords.dy, isImperial ? 3 : 1)}
                     </div>
                     <div>
-                      <span className="text-blue-400 font-bold">ΔZ:</span> {deltaCoords.dz.toFixed(1)}
+                      <span className="text-blue-400 font-bold">ΔZ:</span> {formatValue(deltaCoords.dz, isImperial ? 3 : 1)}
                     </div>
                   </div>
                 )}
@@ -1237,7 +1262,7 @@ export function Viewport3D({
                 {projectedDistance !== null && (
                   <div className="flex items-center justify-between text-[10px] font-mono bg-gray-900/80 px-2 py-1 rounded border border-gray-800">
                     <span className="text-gray-400">Kesit Boyunca Mesafe:</span>
-                    <span className="text-white font-bold">{projectedDistance.toFixed(2)} mm</span>
+                    <span className="text-white font-bold">{formatLength(projectedDistance, isImperial ? 3 : 2)}</span>
                   </div>
                 )}
 
@@ -1247,13 +1272,13 @@ export function Viewport3D({
                     <div className="p-1.5 rounded bg-cyan-950/40 border border-cyan-900/40">
                       <span className="text-cyan-400 block text-[9px]">A → Düzlem</span>
                       <span className="text-white font-bold">
-                        {planeA_dist >= 0 ? '+' : ''}{planeA_dist.toFixed(1)} mm
+                        {planeA_dist >= 0 ? '+' : ''}{formatLength(planeA_dist, isImperial ? 3 : 1)}
                       </span>
                     </div>
                     <div className="p-1.5 rounded bg-amber-950/40 border border-amber-900/40">
                       <span className="text-amber-400 block text-[9px]">B → Düzlem</span>
                       <span className="text-white font-bold">
-                        {planeB_dist >= 0 ? '+' : ''}{planeB_dist.toFixed(1)} mm
+                        {planeB_dist >= 0 ? '+' : ''}{formatLength(planeB_dist, isImperial ? 3 : 1)}
                       </span>
                     </div>
                   </div>
@@ -1552,6 +1577,18 @@ export function Viewport3D({
                 splitResult={splitResult}
               />
 
+              {/* Explicit Highlight for Lasso Selected Faces & Intersecting Vertices */}
+              {model && selectedFaces && selectedFaces.length > 0 && (
+                <SelectedFacesHighlight
+                  model={model}
+                  selectedFaceIndices={selectedFaces}
+                  selectedVertexIndices={selectedVertices}
+                  highlightColor="#f59e0b"
+                  wireframeColor="#fef08a"
+                  vertexColor="#38bdf8"
+                />
+              )}
+
               {/* Interior inspection cavity illumination light */}
               {activeMode === 'plane' && clippingConfig?.enabled && (
                 <pointLight position={[0, 0, 0]} intensity={0.75} color="#ffffff" distance={250} />
@@ -1605,10 +1642,17 @@ export function Viewport3D({
                   <LassoDrawer
                     mesh={model}
                     isDrawing={isDrawing}
+                    isLoopClosed={isLoopClosed}
                     drawnPoints={drawnPoints}
                     onAddPoint={onAddPoint}
                     onAddStrokePoints={onAddStrokePoints}
                     onCloseLoop={onCloseLoop}
+                    onSelectFaces={onSelectFaces}
+                    existingSelection={selectedFaces}
+                    frontFacingOnly={lassoFrontFacingOnly}
+                    selectionMode={lassoSelectionMode}
+                    controlsRef={controlsRef}
+                    isShiftPressed={isShiftPressed}
                   />
 
                   {/* Once Loop is Closed, show Neon Green Cut Plane & Orange Connector Pin */}
@@ -1716,7 +1760,40 @@ export function Viewport3D({
           onChangeHeatmapConfig && onChangeHeatmapConfig({ showBuildPlate: !heatmapConfig?.showBuildPlate })
         }
         onOpenOverhangTab={onOpenOverhangTab}
+        onOpenOrientationModal={onOpenOrientationModal}
       />
+
+      {/* Floating HUD for Raycaster Lasso Face & Vertex Selection */}
+      {activeMode === 'lasso' && !isMeasureActive && (
+        <LassoSelectionHUD
+          visible={true}
+          selectedFacesCount={selectedFaces?.length || 0}
+          selectedVerticesCount={selectedVertices?.length || 0}
+          totalFacesCount={
+            modelInfo?.triangleCount ||
+            (model?.geometry?.attributes?.position?.count
+              ? Math.floor(model.geometry.attributes.position.count / 3)
+              : 0)
+          }
+          surfaceArea={lassoSelectionStats?.surfaceArea || 0}
+          isDrawing={isDrawing}
+          isLoopClosed={isLoopClosed}
+          drawnPointsCount={drawnPoints?.length || 0}
+          frontFacingOnly={lassoFrontFacingOnly}
+          selectionMode={lassoSelectionMode}
+          onToggleDrawing={onToggleDrawing}
+          onClearDrawing={onClearDrawing}
+          onClearSelection={onClearFaceSelection}
+          onInvertSelection={onInvertFaceSelection}
+          onSelectAll={onSelectAllFaces}
+          onDeleteSelectedFaces={onDeleteSelectedFaces}
+          onToggleFrontFacing={onToggleFrontFacing}
+          onChangeSelectionMode={onChangeSelectionMode}
+          onAlignPlaneToSelection={onAlignPlaneToSelection}
+          onCloseLoop={onCloseLoop}
+          onExecuteLassoSplit={onExecuteLassoSplit}
+        />
+      )}
     </div>
   );
 }

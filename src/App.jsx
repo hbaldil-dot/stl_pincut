@@ -8,6 +8,7 @@ import { HistoryPanel } from './components/HistoryPanel';
 import { MeshListPanel } from './components/MeshListPanel';
 import { BatchProcessingModal } from './components/BatchProcessingModal';
 import { VolumeMaterialModal } from './components/VolumeMaterialModal';
+import { OrientationAssistantModal } from './components/OrientationAssistantModal';
 import { loadSamplePreset, parseCustomSTL, MATERIAL_THEMES } from './utils/stlLoaderHelper';
 import { SAMPLE_PRESETS } from './utils/sampleModels';
 import { sliceMeshWithPlane, sliceMeshWithLasso } from './utils/meshSlicer';
@@ -30,9 +31,18 @@ import {
   calculateGeometryStats
 } from './utils/stlExporter';
 import {
+  loadActiveExportConfig,
+  saveActiveExportConfig,
+  resolveAllFilenames
+} from './utils/exportSettingsStorage';
+import {
   createSupportHeatmapMaterial,
   calculateOverhangStatistics
 } from './utils/supportHeatmap';
+import {
+  deleteSelectedFacesFromMesh,
+  performLassoRaycastSelection
+} from './utils/lassoSelectionHelper';
 import {
   Download,
   Scissors,
@@ -99,6 +109,17 @@ export function App() {
   const [loopPoints, setLoopPoints] = useState([]);
   const [isShiftPressed, setIsShiftPressed] = useState(false);
 
+  // Raycaster Lasso Face & Vertex Selection state
+  const [selectedFaces, setSelectedFaces] = useState([]);
+  const [selectedVertices, setSelectedVertices] = useState([]);
+  const [lassoSelectionStats, setLassoSelectionStats] = useState({
+    faceCount: 0,
+    vertexCount: 0,
+    surfaceArea: 0
+  });
+  const [lassoFrontFacingOnly, setLassoFrontFacingOnly] = useState(true);
+  const [lassoSelectionMode, setLassoSelectionMode] = useState('replace');
+
   // Alignment Pin & Hole Configuration with Surface Normal Snapping & Flush Fitting
   const [pinConfig, setPinConfig] = useState({
     mode: 'pin_and_hole', // 'pin_and_hole' | 'holes_both' | 'hole_only' | 'pin_only' | 'flat'
@@ -163,13 +184,16 @@ export function App() {
     showBuildPlate: true
   });
 
-  // STL Export Configuration (Mesh density / decimation ratio & Binary/ASCII format)
-  const [exportConfig, setExportConfig] = useState({
-    format: 'binary',
-    density: 1.0,
-    preset: 'original',
-    decimalPrecision: 4
-  });
+  // STL Export Configuration (Precision, Units, Naming Conventions & Presets)
+  const [exportConfig, setExportConfig] = useState(() => loadActiveExportConfig());
+
+  const handleExportConfigChange = (newConfig) => {
+    setExportConfig((prev) => {
+      const updated = typeof newConfig === 'function' ? newConfig(prev) : { ...prev, ...newConfig };
+      saveActiveExportConfig(updated);
+      return updated;
+    });
+  };
 
   // Per-Mesh display & material customization configs
   // Map of meshId -> { visible: boolean, wireframe: boolean, opacity: number, materialTheme: object|null, customColor: string|null }
@@ -255,6 +279,9 @@ export function App() {
     commandStackRef.current.execute(command, commandContext);
   };
 
+  // Orientation Assistant State
+  const [isOrientationModalOpen, setIsOrientationModalOpen] = useState(false);
+
   // Batch Processing Queue State
   const [isBatchModalOpen, setIsBatchModalOpen] = useState(false);
   const [batchQueue, setBatchQueue] = useState([]);
@@ -262,6 +289,26 @@ export function App() {
   const [currentBatchProcessingId, setCurrentBatchProcessingId] = useState(null);
   const [isExportingBatchAll, setIsExportingBatchAll] = useState(false);
   const cancelBatchRef = useRef(false);
+  const [batchSettings, setBatchSettings] = useState({
+    clipping: {
+      axis: 'y',
+      offset: 0,
+      offsetMode: 'absolute', // 'absolute' | 'percentage'
+      negate: false,
+      addPinOnSlice: true
+    },
+    pin: {
+      mode: 'pin_and_hole', // 'pin_and_hole' | 'holes_both' | 'flat'
+      diameter: 8.0,
+      depth: 10.0,
+      clearance: 0.2,
+      type: 'cylinder', // 'cylinder' | 'square' | 'hex' | 'cone'
+      taper: 0.85,
+      snapToNormal: true,
+      snapToCenter: true,
+      flushFit: true
+    }
+  });
 
   const controlsRef = useRef(null);
 
@@ -593,6 +640,14 @@ export function App() {
       if (e.key === 'Escape') {
         if (isMeasureActive) {
           handleClearMeasurement();
+        } else if (activeMode === 'lasso' && drawnPoints.length > 0) {
+          handleClearDrawing();
+        }
+      }
+      if (e.key === 'Enter' && !e.target.matches('input, textarea')) {
+        if (activeMode === 'lasso' && drawnPoints.length >= 3 && !isLoopClosed) {
+          e.preventDefault();
+          handleCloseLoop();
         }
       }
       if (e.code === 'Space' && !e.target.matches('input, textarea')) {
@@ -1128,20 +1183,71 @@ export function App() {
     }
   };
 
+  const handleSyncBatchWithViewport = () => {
+    setBatchSettings({
+      clipping: {
+        axis: clippingConfig.axis || 'y',
+        offset: clippingConfig.offset || 0,
+        offsetMode: 'absolute',
+        negate: clippingConfig.negate || false,
+        addPinOnSlice: clippingConfig.addPinOnSlice !== false
+      },
+      pin: {
+        mode: pinConfig.mode || 'pin_and_hole',
+        diameter: pinConfig.diameter || 8.0,
+        depth: pinConfig.depth || 10.0,
+        clearance: typeof pinConfig.clearance === 'number' ? pinConfig.clearance : 0.2,
+        type: pinConfig.type || 'cylinder',
+        taper: pinConfig.taper || 0.85,
+        snapToNormal: pinConfig.snapToNormal !== false,
+        snapToCenter: pinConfig.snapToCenter !== false,
+        flushFit: pinConfig.flushFit !== false
+      }
+    });
+    setStatusMessage('Toplu işlem ayarları 3D sahne ayarlarıyla eşitlendi.');
+  };
+
+  const handleApplyBatchToViewport = () => {
+    const { clipping, pin } = batchSettings;
+    setClippingConfig(prev => ({
+      ...prev,
+      axis: clipping.axis || 'y',
+      offset: clipping.offset || 0,
+      negate: clipping.negate || false,
+      addPinOnSlice: clipping.addPinOnSlice !== false,
+      enabled: true
+    }));
+    setPinConfig(prev => ({
+      ...prev,
+      mode: pin.mode || 'pin_and_hole',
+      diameter: pin.diameter || 8.0,
+      depth: pin.depth || 10.0,
+      clearance: typeof pin.clearance === 'number' ? pin.clearance : 0.2,
+      type: pin.type || 'cylinder',
+      taper: pin.taper || 0.85,
+      snapToNormal: pin.snapToNormal !== false,
+      snapToCenter: pin.snapToCenter !== false,
+      flushFit: pin.flushFit !== false
+    }));
+    setActiveMode('plane');
+    setStatusMessage('Toplu kesim ve pim ayarları aktif 3D sahneye uygulandı.');
+  };
+
   const handleStartBatchProcessing = async () => {
     if (batchQueue.length === 0 || isBatchProcessing) return;
     setIsBatchProcessing(true);
     cancelBatchRef.current = false;
 
+    const { clipping, pin } = batchSettings;
+
     const effNormal = new THREE.Vector3(
-      clippingConfig.axis === 'x' ? 1 : 0,
-      clippingConfig.axis === 'y' ? 1 : 0,
-      clippingConfig.axis === 'z' ? 1 : 0
+      clipping.axis === 'x' ? 1 : 0,
+      clipping.axis === 'y' ? 1 : 0,
+      clipping.axis === 'z' ? 1 : 0
     );
-    if (clippingConfig.negate) {
+    if (clipping.negate) {
       effNormal.negate();
     }
-    const effOffset = clippingConfig.negate ? -clippingConfig.offset : clippingConfig.offset;
 
     let currentQueue = [...batchQueue];
 
@@ -1186,12 +1292,30 @@ export function App() {
         setBatchQueue([...currentQueue]);
         await new Promise(r => setTimeout(r, 40));
 
+        // Effective offset per mesh supporting percentage and absolute modes
+        let effOffset = 0;
+        if (clipping.offsetMode === 'percentage') {
+          mesh.geometry.computeBoundingBox();
+          const bbox = mesh.geometry.boundingBox;
+          const ax = clipping.axis || 'y';
+          const minVal = bbox ? bbox.min[ax] : -25;
+          const maxVal = bbox ? bbox.max[ax] : 25;
+          const span = maxVal - minVal;
+          const pct = typeof clipping.offset === 'number' ? clipping.offset : 50;
+          effOffset = minVal + (pct / 100) * span;
+        } else {
+          effOffset = clipping.offset || 0;
+        }
+        if (clipping.negate) {
+          effOffset = -effOffset;
+        }
+
         const result = sliceMeshWithPlane(
           mesh,
           effNormal,
           effOffset,
-          pinConfig,
-          clippingConfig.addPinOnSlice
+          pin,
+          clipping.addPinOnSlice
         );
 
         currentQueue[i] = {
@@ -1246,7 +1370,7 @@ export function App() {
     try {
       await downloadBatchProcessedZip(
         completedItems,
-        { clippingConfig, pinConfig },
+        { clippingConfig: batchSettings.clipping, pinConfig: batchSettings.pin },
         exportConfig
       );
       setStatusMessage(`${completedItems.length} modelin tüm parçaları tek ZIP olarak indirildi!`);
@@ -1410,7 +1534,11 @@ export function App() {
     setDrawnPoints([]);
     setIsLoopClosed(false);
     setLoopPoints([]);
-    setStatusMessage('Çizim temizlendi.');
+    setSelectedFaces([]);
+    setSelectedVertices([]);
+    setLassoSelectionStats({ faceCount: 0, vertexCount: 0, surfaceArea: 0 });
+    setIsDrawing(true);
+    setStatusMessage('Kement çizimi ve yüzey seçimi temizlendi. Model üzerinde yeni kement çizebilirsiniz.');
     pushHistory('Kement Çizimi Temizlendi', 'LASSO_CLEAR', {
       drawnPoints: [],
       isLoopClosed: false,
@@ -1420,8 +1548,11 @@ export function App() {
 
   const handleUndoPoint = () => {
     setDrawnPoints((prev) => {
-      const next = prev.slice(0, -5);
-      if (next.length < 3) setIsLoopClosed(false);
+      const next = prev.slice(0, -2);
+      if (next.length < 3) {
+        setIsLoopClosed(false);
+        setIsDrawing(true);
+      }
       return next;
     });
   };
@@ -1437,6 +1568,150 @@ export function App() {
       isLoopClosed: true,
       loopPoints: nextLoop
     });
+  };
+
+  /**
+   * Raycaster-based Lasso Face & Vertex Selection Handlers
+   */
+  const handleSelectFaces = (result) => {
+    if (!result) return;
+    const {
+      selectedFaceIndices = [],
+      selectedVertexIndices = [],
+      surfaceArea = 0,
+      faceCount = 0,
+      vertexCount = 0
+    } = result;
+
+    setSelectedFaces(selectedFaceIndices);
+    setSelectedVertices(selectedVertexIndices);
+    setLassoSelectionStats({
+      faceCount,
+      vertexCount,
+      surfaceArea
+    });
+
+    if (faceCount > 0) {
+      setStatusMessage(`${faceCount.toLocaleString()} yüzey ve ${vertexCount.toLocaleString()} köşe seçildi (${surfaceArea} mm²).`);
+    }
+  };
+
+  const handleClearFaceSelection = () => {
+    setSelectedFaces([]);
+    setSelectedVertices([]);
+    setLassoSelectionStats({ faceCount: 0, vertexCount: 0, surfaceArea: 0 });
+    setStatusMessage('Yüzey seçimi temizlendi.');
+  };
+
+  const handleInvertFaceSelection = () => {
+    if (!model || !model.geometry) return;
+    const geom = model.geometry;
+    const posAttr = geom.attributes.position;
+    if (!posAttr) return;
+    const isIndexed = !!geom.index;
+    const totalFaces = isIndexed
+      ? Math.floor(geom.index.count / 3)
+      : Math.floor(posAttr.count / 3);
+
+    const currSet = new Set(selectedFaces);
+    const inverted = [];
+    for (let f = 0; f < totalFaces; f++) {
+      if (!currSet.has(f)) inverted.push(f);
+    }
+
+    const vertexSet = new Set();
+    inverted.forEach((f) => {
+      if (isIndexed) {
+        vertexSet.add(geom.index.getX(f * 3));
+        vertexSet.add(geom.index.getX(f * 3 + 1));
+        vertexSet.add(geom.index.getX(f * 3 + 2));
+      } else {
+        vertexSet.add(f * 3);
+        vertexSet.add(f * 3 + 1);
+        vertexSet.add(f * 3 + 2);
+      }
+    });
+
+    setSelectedFaces(inverted);
+    setSelectedVertices(Array.from(vertexSet));
+    setLassoSelectionStats({
+      faceCount: inverted.length,
+      vertexCount: vertexSet.size,
+      surfaceArea: 0
+    });
+    setStatusMessage(`Seçim tersine çevrildi: ${inverted.length.toLocaleString()} yüzey seçildi.`);
+  };
+
+  const handleSelectAllFaces = () => {
+    if (!model || !model.geometry) return;
+    const geom = model.geometry;
+    const posAttr = geom.attributes.position;
+    if (!posAttr) return;
+    const isIndexed = !!geom.index;
+    const totalFaces = isIndexed
+      ? Math.floor(geom.index.count / 3)
+      : Math.floor(posAttr.count / 3);
+
+    const allFaces = [];
+    for (let f = 0; f < totalFaces; f++) allFaces.push(f);
+
+    const totalVertices = posAttr.count;
+    const allVertices = [];
+    for (let v = 0; v < totalVertices; v++) allVertices.push(v);
+
+    setSelectedFaces(allFaces);
+    setSelectedVertices(allVertices);
+    setLassoSelectionStats({
+      faceCount: allFaces.length,
+      vertexCount: allVertices.length,
+      surfaceArea: 0
+    });
+    setStatusMessage(`Tüm model seçildi: ${allFaces.length.toLocaleString()} yüzey.`);
+  };
+
+  const handleDeleteSelectedFaces = () => {
+    if (!model || selectedFaces.length === 0) return;
+    const deletedCount = selectedFaces.length;
+    const newMesh = deleteSelectedFacesFromMesh(model, selectedFaces);
+    if (newMesh) {
+      setModel(newMesh);
+      const stats = calculateGeometryStats(newMesh.geometry);
+      if (modelInfo) {
+        setModelInfo((prev) => ({
+          ...prev,
+          triangles: stats.triangles,
+          vertices: stats.vertices
+        }));
+      }
+      setFaceCount(stats.triangles);
+      handleClearFaceSelection();
+      setStatusMessage(`${deletedCount.toLocaleString()} yüzey modelden başarıyla silindi.`);
+      pushHistory('Seçili Yüzeyler Silindi', 'DELETE_FACES', {
+        deletedCount
+      });
+    }
+  };
+
+  const handleAlignPlaneToSelection = () => {
+    if (selectedFaces.length === 0 || !model) return;
+    const result = performLassoRaycastSelection({
+      mesh: model,
+      existingSelection: selectedFaces,
+      mode: 'add',
+      options: { frontFacingOnly: false }
+    });
+    if (result && result.centroid) {
+      const normal = result.normal.clone().normalize();
+      const offset = result.centroid.dot(normal);
+      setClippingConfig((prev) => ({
+        ...prev,
+        enabled: true,
+        normal,
+        offset
+      }));
+      setActiveMode('plane');
+      setStatusMessage('Kesim düzlemi ve pim seçilen yüzeylerin merkezine ve normaline hizalandı.');
+    }
   };
 
   const handlePinConfigChange = (changes, isContinuous = false) => {
@@ -1611,6 +1886,21 @@ export function App() {
     setStatusMessage('Model en yakın 90° dik açıyla tablaya hizalandı.');
   };
 
+  const handleApplyOptimalRotation = (targetRotation, description) => {
+    if (!targetRotation) return;
+    const prev = modelRotationRef.current;
+    const desc = description || `Optimal Düz Taban Uygulandı (X:${targetRotation.x}° Y:${targetRotation.y}° Z:${targetRotation.z}°)`;
+    const cmd = new ModelTransformCommand({
+      previousRotation: prev,
+      newRotation: targetRotation,
+      description: desc,
+      subType: 'rotation_flat_bottom',
+      isContinuous: false
+    });
+    executeCommand(cmd);
+    setStatusMessage(`Optimal düz taban uygulandı: X: ${targetRotation.x}°, Y: ${targetRotation.y}°, Z: ${targetRotation.z}°`);
+  };
+
   const handleRotationDragEnd = () => {
     isDraggingRotationRef.current = false;
     const prev = rotationBeforeDragRef.current || { x: 0, y: 0, z: 0 };
@@ -1690,46 +1980,57 @@ export function App() {
    */
   const handleExportPartA = () => {
     if (splitResult) {
-      downloadMeshSTL(splitResult.partA.geometry, `${modelName}_Part_1_Pin.stl`, exportConfig.format, exportConfig);
-      setStatusMessage(`Part 1 STL (${modelName}_Part_1_Pin.stl) [${exportConfig.format.toUpperCase()} • %${Math.round(exportConfig.density * 100)}] indirildi.`);
+      const filenames = resolveAllFilenames(modelName, exportConfig, splitResult.pinConfig);
+      downloadMeshSTL(splitResult.partA.geometry, filenames.part1, exportConfig.format, exportConfig);
+      setStatusMessage(`${filenames.part1} [${exportConfig.format.toUpperCase()} • %${Math.round(exportConfig.density * 100)}] indirildi.`);
     }
   };
 
   const handleExportPartB = () => {
     if (splitResult) {
-      downloadMeshSTL(splitResult.partB.geometry, `${modelName}_Part_2_Socket.stl`, exportConfig.format, exportConfig);
-      setStatusMessage(`Part 2 STL (${modelName}_Part_2_Socket.stl) [${exportConfig.format.toUpperCase()} • %${Math.round(exportConfig.density * 100)}] indirildi.`);
+      const filenames = resolveAllFilenames(modelName, exportConfig, splitResult.pinConfig);
+      downloadMeshSTL(splitResult.partB.geometry, filenames.part2, exportConfig.format, exportConfig);
+      setStatusMessage(`${filenames.part2} [${exportConfig.format.toUpperCase()} • %${Math.round(exportConfig.density * 100)}] indirildi.`);
     }
   };
 
   const handleExportCombined = () => {
     if (splitResult) {
-      downloadCombinedSTL(splitResult.partA, splitResult.partB, modelName, exportConfig.format, exportConfig);
-      setStatusMessage(`Birleştirilmiş Kesilmiş STL (${modelName}_Sliced_Combined.stl) [${exportConfig.format.toUpperCase()}] indirildi.`);
+      const filenames = resolveAllFilenames(modelName, exportConfig, splitResult.pinConfig);
+      downloadCombinedSTL(
+        splitResult.partA,
+        splitResult.partB,
+        filenames.combined.replace(/\.stl$/i, ''),
+        exportConfig.format,
+        exportConfig
+      );
+      setStatusMessage(`${filenames.combined} [${exportConfig.format.toUpperCase()}] indirildi.`);
     }
   };
 
   const handleExportZip = async () => {
     if (splitResult) {
+      const filenames = resolveAllFilenames(modelName, exportConfig, splitResult.pinConfig);
       await downloadAllPartsZip(splitResult.partA, splitResult.partB, modelName, {
         ...exportConfig,
         dowelPinGeometry: splitResult.dowelPinGeometry,
         dowelSpecs: splitResult.dowelSpecs
       });
-      setStatusMessage(`Tüm parçalar ZIP paketi olarak indirildi [${exportConfig.format.toUpperCase()} • %${Math.round(exportConfig.density * 100)}].`);
+      setStatusMessage(`Tüm parçalar ZIP paketi (${filenames.zip}) olarak indirildi [${exportConfig.format.toUpperCase()} • %${Math.round(exportConfig.density * 100)}].`);
     }
   };
 
   const handleExportDowelPin = () => {
     if (splitResult?.dowelPinGeometry) {
+      const filenames = resolveAllFilenames(modelName, exportConfig, splitResult.pinConfig);
       const specs = splitResult.dowelSpecs || { diameter: 8, length: 20 };
       downloadMeshSTL(
         splitResult.dowelPinGeometry,
-        `${modelName}_Alignment_Dowel_Pin_D${specs.diameter}xL${specs.length}.stl`,
+        filenames.dowel,
         exportConfig.format,
         exportConfig
       );
-      setStatusMessage(`Hizalama Dübel Pimi STL indirildi (Ø${specs.diameter}mm x ${specs.length}mm) [${exportConfig.format.toUpperCase()}].`);
+      setStatusMessage(`${filenames.dowel} indirildi (Ø${specs.diameter}mm x ${specs.length}mm) [${exportConfig.format.toUpperCase()}].`);
     }
   };
 
@@ -1782,6 +2083,17 @@ export function App() {
         onClearDrawing={handleClearDrawing}
         onUndoPoint={handleUndoPoint}
         isLoopClosed={isLoopClosed}
+        selectedFacesCount={selectedFaces.length}
+        selectedVerticesCount={selectedVertices.length}
+        lassoSelectionStats={lassoSelectionStats}
+        onClearFaceSelection={handleClearFaceSelection}
+        onInvertFaceSelection={handleInvertFaceSelection}
+        onSelectAllFaces={handleSelectAllFaces}
+        onDeleteSelectedFaces={handleDeleteSelectedFaces}
+        lassoFrontFacingOnly={lassoFrontFacingOnly}
+        onToggleFrontFacing={() => setLassoFrontFacingOnly((prev) => !prev)}
+        lassoSelectionMode={lassoSelectionMode}
+        onChangeSelectionMode={setLassoSelectionMode}
         pinConfig={pinConfig}
         onPinConfigChange={handlePinConfigChange}
         splitResult={splitResult}
@@ -1800,7 +2112,8 @@ export function App() {
         onExportDowelPin={handleExportDowelPin}
         onOpenExportModal={() => setIsExportModalOpen(true)}
         exportConfig={exportConfig}
-        onChangeExportConfig={setExportConfig}
+        onChangeExportConfig={handleExportConfigChange}
+        onNotify={(msg) => setStatusMessage(msg)}
         onFileUpload={handleFileUpload}
         onSelectPreset={loadPresetModel}
         isWireframe={isWireframe}
@@ -1830,6 +2143,8 @@ export function App() {
         onStepRotate={handleStepRotate}
         onResetRotation={handleResetRotation}
         onAlignFlat={handleAlignFlat}
+        onOpenOrientationModal={() => setIsOrientationModalOpen(true)}
+        onApplyModelRotation={handleApplyOptimalRotation}
         isRotateGizmoActive={isRotateGizmoActive}
         onToggleRotateGizmo={handleToggleRotateGizmo}
         snapAngle={snapAngle}
@@ -1875,6 +2190,10 @@ export function App() {
         onAddBatchFiles={handleAddBatchFiles}
         onAddAllBatchPresets={handleAddAllBatchPresets}
         onClearBatchQueue={handleClearBatchQueue}
+        batchSettings={batchSettings}
+        onBatchSettingsChange={setBatchSettings}
+        onSyncBatchWithViewport={handleSyncBatchWithViewport}
+        onApplyBatchToViewport={handleApplyBatchToViewport}
       />
 
       {/* Right 3D Viewport Scene */}
@@ -1962,6 +2281,16 @@ export function App() {
                   {batchQueue.length}
                 </span>
               )}
+            </button>
+
+            {/* Quick Flat-Bottom Orientation Assistant Button */}
+            <button
+              onClick={() => setIsOrientationModalOpen(true)}
+              className="bg-gray-900/90 hover:bg-gray-800 text-indigo-300 hover:text-white border border-indigo-500/40 hover:border-indigo-400 text-xs font-semibold px-3 py-1.5 rounded-full shadow-2xl flex items-center gap-1.5 transition active:scale-95"
+              title="Otomatik Düz Taban ve Yönelim Asistanı"
+            >
+              <Sparkles className="w-3.5 h-3.5 text-amber-300" />
+              <span className="hidden md:inline">Düz Taban</span>
             </button>
 
             {/* Quick Export Button when Split Result is active */}
@@ -2101,6 +2430,23 @@ export function App() {
           onPinConfigChange={handlePinConfigChange}
           isShiftPressed={isShiftPressed}
           controlsRef={controlsRef}
+          // Raycaster Lasso Face & Vertex Selection props
+          selectedFaces={selectedFaces}
+          selectedVertices={selectedVertices}
+          lassoSelectionStats={lassoSelectionStats}
+          onSelectFaces={handleSelectFaces}
+          onClearFaceSelection={handleClearFaceSelection}
+          onInvertFaceSelection={handleInvertFaceSelection}
+          onSelectAllFaces={handleSelectAllFaces}
+          onDeleteSelectedFaces={handleDeleteSelectedFaces}
+          onAlignPlaneToSelection={handleAlignPlaneToSelection}
+          lassoFrontFacingOnly={lassoFrontFacingOnly}
+          onToggleFrontFacing={() => setLassoFrontFacingOnly((prev) => !prev)}
+          lassoSelectionMode={lassoSelectionMode}
+          onChangeSelectionMode={setLassoSelectionMode}
+          onToggleDrawing={() => setIsDrawing((prev) => !prev)}
+          onClearDrawing={handleClearDrawing}
+          onExecuteLassoSplit={handleExecuteLassoSplit}
           materialTheme={materialTheme}
           showGrid={showGrid}
           showBoundingBox={showBoundingBox}
@@ -2140,6 +2486,7 @@ export function App() {
           onChangeHeatmapConfig={handleChangeHeatmapConfig}
           overhangStats={overhangStats}
           onOpenOverhangTab={() => setActiveControlsTab('overhang')}
+          onOpenOrientationModal={() => setIsOrientationModalOpen(true)}
           // Batch processing props
           onMultipleFilesDrop={(files) => {
             handleAddBatchFiles(files);
@@ -2206,7 +2553,7 @@ export function App() {
         splitResult={splitResult}
         originalModel={model}
         exportConfig={exportConfig}
-        onChangeExportConfig={setExportConfig}
+        onChangeExportConfig={handleExportConfigChange}
         onNotify={(msg) => setStatusMessage(msg)}
       />
 
@@ -2218,8 +2565,26 @@ export function App() {
         onUpdateQueue={setBatchQueue}
         activeClippingConfig={clippingConfig}
         activePinConfig={pinConfig}
+        batchSettings={batchSettings}
+        onBatchSettingsChange={setBatchSettings}
+        onApplyToViewport={handleApplyBatchToViewport}
         onLoadItemInViewport={handleLoadBatchItemInViewport}
         onNotify={(msg) => setStatusMessage(msg)}
+      />
+
+      {/* Automated Flat-Bottom Orientation Assistant Modal */}
+      <OrientationAssistantModal
+        isOpen={isOrientationModalOpen}
+        onClose={() => setIsOrientationModalOpen(false)}
+        model={model}
+        splitResult={splitResult}
+        modelRotation={modelRotation}
+        onApplyRotation={handleApplyOptimalRotation}
+        onNotify={(msg) => setStatusMessage(msg)}
+        onOpenHeatmap={() => {
+          setHeatmapConfig((prev) => ({ ...prev, enabled: true }));
+          setActiveControlsTab('overhang');
+        }}
       />
 
       {/* History Timeline Panel (Undo/Redo & Time Travel) */}

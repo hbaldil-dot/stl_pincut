@@ -1,6 +1,7 @@
 import React, { useMemo } from 'react';
 import * as THREE from 'three';
 import { Html } from '@react-three/drei';
+import { useUnit } from '../context/UnitContext.jsx';
 
 /**
  * Visualizes the model's Axis-Aligned Bounding Box (AABB) in 3D space
@@ -16,6 +17,8 @@ export function BoundingBoxHelper({
   modelRotation,
   modelScale
 }) {
+  const { unit, formatLength, formatValue, isImperial } = useUnit();
+
   const aabbData = useMemo(() => {
     if (!visible) return null;
 
@@ -142,7 +145,7 @@ export function BoundingBoxHelper({
         <div className="pointer-events-none select-none bg-gray-950/90 border border-red-500/80 px-2 py-0.5 rounded-full shadow-lg backdrop-blur-sm flex items-center gap-1">
           <span className="w-1.5 h-1.5 rounded-full bg-red-400" />
           <span className="text-[10px] font-mono font-bold text-red-300">
-            X: {size.x.toFixed(1)} mm
+            X: {formatLength(size.x, isImperial ? 2 : 1)}
           </span>
         </div>
       </Html>
@@ -157,7 +160,7 @@ export function BoundingBoxHelper({
         <div className="pointer-events-none select-none bg-gray-950/90 border border-green-500/80 px-2 py-0.5 rounded-full shadow-lg backdrop-blur-sm flex items-center gap-1">
           <span className="w-1.5 h-1.5 rounded-full bg-green-400" />
           <span className="text-[10px] font-mono font-bold text-green-300">
-            Y: {size.y.toFixed(1)} mm
+            Y: {formatLength(size.y, isImperial ? 2 : 1)}
           </span>
         </div>
       </Html>
@@ -172,7 +175,7 @@ export function BoundingBoxHelper({
         <div className="pointer-events-none select-none bg-gray-950/90 border border-blue-500/80 px-2 py-0.5 rounded-full shadow-lg backdrop-blur-sm flex items-center gap-1">
           <span className="w-1.5 h-1.5 rounded-full bg-blue-400" />
           <span className="text-[10px] font-mono font-bold text-blue-300">
-            Z: {size.z.toFixed(1)} mm
+            Z: {formatLength(size.z, isImperial ? 2 : 1)}
           </span>
         </div>
       </Html>
@@ -187,7 +190,7 @@ export function BoundingBoxHelper({
         <div className="pointer-events-none select-none bg-cyan-950/90 border border-cyan-400/70 text-cyan-200 px-2.5 py-1 rounded-xl shadow-xl backdrop-blur-md flex items-center gap-1.5 whitespace-nowrap">
           <span className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse" />
           <span className="text-[11px] font-mono font-bold">
-            AABB: {size.x.toFixed(1)} × {size.y.toFixed(1)} × {size.z.toFixed(1)} mm
+            AABB: {formatValue(size.x, isImperial ? 2 : 1)} × {formatValue(size.y, isImperial ? 2 : 1)} × {formatValue(size.z, isImperial ? 2 : 1)} {unit}
           </span>
         </div>
       </Html>

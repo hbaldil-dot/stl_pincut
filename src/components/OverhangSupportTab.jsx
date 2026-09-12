@@ -12,12 +12,16 @@ import {
   CheckCircle2,
   TrendingDown,
   Info,
-  Maximize2
+  Maximize2,
+  Check,
+  ArrowDown,
+  ExternalLink
 } from 'lucide-react';
 import {
   PRINT_ORIENTATION_PRESETS,
   findOptimalPrintOrientation
 } from '../utils/supportHeatmap';
+import { findOptimalFlatBottomOrientations } from '../utils/orientationAssistant';
 
 export function OverhangSupportTab({
   model,
@@ -26,10 +30,12 @@ export function OverhangSupportTab({
   heatmapConfig,
   onChangeHeatmapConfig,
   onApplyModelRotationAsPrintDir,
-  overhangStats
+  overhangStats,
+  onApplyModelRotation,
+  onOpenOrientationModal
 }) {
   const [isOptimizing, setIsOptimizing] = useState(false);
-  const [optimizationResult, setOptimizationResult] = useState(null);
+  const [flatBottomResult, setFlatBottomResult] = useState(null);
 
   const activeGeometry = useMemo(() => {
     if (splitResult?.partA?.geometry) return splitResult.partA.geometry;
@@ -40,10 +46,22 @@ export function OverhangSupportTab({
     if (!activeGeometry) return;
     setIsOptimizing(true);
     setTimeout(() => {
-      const result = findOptimalPrintOrientation(activeGeometry, heatmapConfig.thresholdDeg);
-      setOptimizationResult(result);
+      const result = findOptimalFlatBottomOrientations(activeGeometry, {
+        thresholdDeg: heatmapConfig.thresholdDeg,
+        warnRangeDeg: heatmapConfig.warnRangeDeg || 10,
+        currentRotation: modelRotation,
+        maxCandidates: 6
+      });
+      setFlatBottomResult(result);
       setIsOptimizing(false);
-    }, 150);
+    }, 180);
+  };
+
+  const handleApplyFlatBottom = (candidate) => {
+    if (!candidate) return;
+    if (onApplyModelRotation) {
+      onApplyModelRotation(candidate.rotation, `Optimal Düz Taban Uygulandı: ${candidate.name}`);
+    }
   };
 
   const handleApplyPreset = (preset) => {
@@ -360,47 +378,121 @@ export function OverhangSupportTab({
         </div>
       </div>
 
-      {/* 6. Auto-Optimization Recommendation Card */}
-      <div className="bg-indigo-950/40 rounded-2xl p-3.5 border border-indigo-500/30 flex flex-col gap-2.5">
+      {/* 6. Automated Flat-Bottom Orientation Assistant Card */}
+      <div className="bg-gradient-to-br from-indigo-950/50 via-gray-900 to-gray-950 rounded-2xl p-4 border border-indigo-500/40 shadow-xl flex flex-col gap-3">
         <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <div className="p-1.5 rounded-lg bg-indigo-500/20 text-indigo-300 border border-indigo-400/30">
+          <div className="flex items-center gap-2.5">
+            <div className="p-2 rounded-xl bg-indigo-500/20 text-indigo-300 border border-indigo-400/30 shadow-sm">
               <Sparkles className="w-4 h-4" />
             </div>
             <div>
-              <div className="text-xs font-bold text-gray-100">Optimal Yön Bulucu</div>
-              <div className="text-[10px] text-indigo-300">En az destek gerektiren baskı açısını hesaplar</div>
+              <div className="text-xs font-bold text-gray-100 flex items-center gap-1.5">
+                <span>Otomatik Düz Taban Asistanı</span>
+                <span className="text-[9px] bg-indigo-500/30 text-indigo-300 font-mono px-1.5 py-0.2 rounded-full border border-indigo-500/40 font-bold">
+                  Düz Taban Optimizasyonu
+                </span>
+              </div>
+              <div className="text-[10px] text-gray-400">
+                Modelin düz yüzeylerini bularak en az destek gerektiren açıyı hesaplar
+              </div>
             </div>
           </div>
 
-          <button
-            onClick={handleRunOptimizer}
-            disabled={isOptimizing}
-            className="py-1.5 px-3 bg-indigo-600 hover:bg-indigo-500 disabled:bg-gray-800 text-white rounded-xl text-xs font-semibold transition shadow-md shadow-indigo-950/80 flex items-center gap-1.5"
-          >
-            {isOptimizing ? <RotateCw className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5" />}
-            <span>{isOptimizing ? 'Analiz Ediliyor...' : 'Analiz Et'}</span>
-          </button>
+          <div className="flex items-center gap-1.5">
+            <button
+              onClick={handleRunOptimizer}
+              disabled={isOptimizing}
+              className="py-1.5 px-3 bg-indigo-600 hover:bg-indigo-500 disabled:bg-gray-800 text-white rounded-xl text-xs font-semibold transition shadow-md shadow-indigo-950/80 flex items-center gap-1.5 active:scale-95"
+              title="Yüzeyleri tara ve en az destek gerektiren düz tabanı bul"
+            >
+              {isOptimizing ? <RotateCw className="w-3.5 h-3.5 animate-spin text-white" /> : <Sparkles className="w-3.5 h-3.5 text-indigo-200" />}
+              <span>{isOptimizing ? 'Taranıyor...' : 'Analiz Et'}</span>
+            </button>
+
+            {onOpenOrientationModal && (
+              <button
+                onClick={onOpenOrientationModal}
+                className="p-1.5 bg-gray-800 hover:bg-gray-700 text-gray-300 hover:text-white rounded-xl border border-gray-700 transition"
+                title="Genişletilmiş Asistan Modalı"
+              >
+                <ExternalLink className="w-3.5 h-3.5" />
+              </button>
+            )}
+          </div>
         </div>
 
-        {optimizationResult && (
-          <div className="bg-indigo-950/80 rounded-xl p-2.5 border border-indigo-800/60 flex flex-col gap-2 mt-1">
+        {flatBottomResult && flatBottomResult.bestCandidate && (
+          <div className="bg-gray-950/80 rounded-xl p-3 border border-indigo-900/60 flex flex-col gap-2.5 animate-in fade-in duration-200">
+            {/* Header with savings badge */}
             <div className="flex items-center justify-between text-xs">
-              <span className="text-indigo-200 font-semibold flex items-center gap-1">
-                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-                Önerilen Yön: {optimizationResult.bestOrientation.name}
+              <span className="text-white font-bold flex items-center gap-1.5">
+                <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+                <span>{flatBottomResult.bestCandidate.name}</span>
               </span>
-              <span className="text-emerald-400 font-bold font-mono">
-                %{optimizationResult.bestStats.supportPercent.toFixed(1)} Destek
+
+              {flatBottomResult.bestCandidate.supportReductionPercent > 0.5 ? (
+                <span className="bg-emerald-950 border border-emerald-500/50 text-emerald-300 text-[10px] font-mono font-bold px-2 py-0.5 rounded-full flex items-center gap-1">
+                  <TrendingDown className="w-3 h-3 text-emerald-400" />
+                  -%{flatBottomResult.bestCandidate.supportReductionPercent.toFixed(0)} Destek Tasarrufu
+                </span>
+              ) : (
+                <span className="bg-gray-800 text-gray-300 text-[10px] px-2 py-0.5 rounded-full font-mono">
+                  En İyi Yönelim
+                </span>
+              )}
+            </div>
+
+            {/* Quick Metrics */}
+            <div className="grid grid-cols-2 gap-2 text-[11px] font-mono">
+              <div className="bg-gray-900 p-2 rounded-lg border border-gray-800">
+                <div className="text-[9px] text-gray-400">Destek Gereken Alan:</div>
+                <div className="text-red-400 font-bold text-xs mt-0.5">
+                  {flatBottomResult.bestCandidate.supportAreaCm2.toFixed(1)} cm²
+                  <span className="text-[9px] text-gray-500 font-normal ml-1">
+                    (%{flatBottomResult.bestCandidate.supportPercent.toFixed(1)})
+                  </span>
+                </div>
+              </div>
+
+              <div className="bg-gray-900 p-2 rounded-lg border border-gray-800">
+                <div className="text-[9px] text-gray-400">Taban Temas Yüzeyi:</div>
+                <div className="text-emerald-400 font-bold text-xs mt-0.5">
+                  {flatBottomResult.bestCandidate.bedContactAreaCm2.toFixed(1)} cm²
+                  <span className="text-[9px] text-gray-500 font-normal ml-1">
+                    (%{flatBottomResult.bestCandidate.bedContactPercent.toFixed(1)})
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            {/* Rotation Angles */}
+            <div className="flex items-center justify-between text-[11px] text-gray-400 bg-gray-900/60 px-2.5 py-1.5 rounded-lg border border-gray-850 font-mono">
+              <span>Hedef Döndürme:</span>
+              <span className="text-cyan-400 font-bold">
+                X:{flatBottomResult.bestCandidate.rotation.x}° Y:{flatBottomResult.bestCandidate.rotation.y}° Z:{flatBottomResult.bestCandidate.rotation.z}°
               </span>
             </div>
 
-            <button
-              onClick={() => handleApplyPreset(optimizationResult.bestOrientation)}
-              className="w-full py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-bold transition flex items-center justify-center gap-1.5 shadow-sm"
-            >
-              <span>Önerilen Yönü Uygula ({optimizationResult.bestOrientation.name})</span>
-            </button>
+            {/* Action Buttons */}
+            <div className="flex items-center gap-2 pt-0.5">
+              <button
+                onClick={() => handleApplyFlatBottom(flatBottomResult.bestCandidate)}
+                className="flex-1 py-2 px-3 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white rounded-lg text-xs font-bold transition flex items-center justify-center gap-1.5 shadow-md shadow-emerald-950/50 active:scale-98"
+              >
+                <CheckCircle2 className="w-3.5 h-3.5" />
+                <span>Modeli Bu Açıda Tablaya Oturt</span>
+              </button>
+
+              {onOpenOrientationModal && (
+                <button
+                  onClick={onOpenOrientationModal}
+                  className="py-2 px-2.5 bg-gray-850 hover:bg-gray-800 text-gray-300 rounded-lg text-xs font-semibold border border-gray-700 transition"
+                  title="Diğer alternatifleri incele"
+                >
+                  Alternatifler ({flatBottomResult.candidates.length})
+                </button>
+              )}
+            </div>
           </div>
         )}
       </div>

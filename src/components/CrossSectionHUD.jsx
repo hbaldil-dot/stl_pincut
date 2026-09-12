@@ -14,6 +14,7 @@ import {
   Sliders,
   HelpCircle
 } from 'lucide-react';
+import { useUnit, UnitToggle } from '../context/UnitContext.jsx';
 
 /**
  * Floating Cross-Section & Internal Geometry Inspection HUD Overlay
@@ -28,6 +29,7 @@ export function CrossSectionHUD({
   modelInfo,
   onResetOffset
 }) {
+  const { unit, formatValue, isImperial } = useUnit();
   const [showAdvancedAngles, setShowAdvancedAngles] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
 
@@ -81,7 +83,8 @@ export function CrossSectionHUD({
           </div>
         </div>
 
-        <div className="flex items-center gap-1">
+        <div className="flex items-center gap-1.5">
+          <UnitToggle size="xs" />
           <button
             onClick={() => setShowHelp((prev) => !prev)}
             className={`p-1 rounded-lg transition ${
@@ -230,7 +233,7 @@ export function CrossSectionHUD({
           </span>
           <div className="flex items-center gap-1">
             <span className="font-mono font-bold text-sky-300 bg-sky-950/80 px-1.5 py-0.5 rounded border border-sky-500/40">
-              {currentOffset >= 0 ? `+${currentOffset.toFixed(1)}` : currentOffset.toFixed(1)} mm
+              {currentOffset >= 0 ? `+${formatValue(currentOffset, isImperial ? 2 : 1)}` : formatValue(currentOffset, isImperial ? 2 : 1)} {unit}
             </span>
             <button
               onClick={() => {
@@ -238,7 +241,7 @@ export function CrossSectionHUD({
                 else onClippingConfigChange({ offset: 0 }, false);
               }}
               className="p-1 hover:bg-gray-800 rounded text-gray-400 hover:text-white transition"
-              title="Merkeze Sıfırla (0 mm)"
+              title="Merkeze Sıfırla (0)"
             >
               <RotateCcw className="w-3 h-3" />
             </button>

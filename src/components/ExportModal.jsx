@@ -25,6 +25,7 @@ import {
 } from '../utils/stlExporter';
 import { ExportConfigPanel } from './ExportConfigPanel';
 import { loadConfigHistory, downloadConfigComparisonCSV } from '../utils/configHistoryStorage';
+import { resolveAllFilenames } from '../utils/exportSettingsStorage';
 
 export function ExportModal({
   isOpen,
@@ -62,40 +63,39 @@ export function ExportModal({
   const exportFormat = currentConfig.format || 'binary';
   const density = typeof currentConfig.density === 'number' ? currentConfig.density : 1.0;
   const cleanName = (customName || modelName || 'Model').trim().replace(/\.stl$/i, '');
+  const pinCfg = splitResult?.pinConfig || null;
+  const filenames = resolveAllFilenames(cleanName, currentConfig, pinCfg);
 
   const statsA = calculateGeometryStats(splitResult?.partA?.geometry, density);
   const statsB = calculateGeometryStats(splitResult?.partB?.geometry, density);
   const dowelGeom = splitResult?.dowelPinGeometry || null;
   const dowelSpecs = splitResult?.dowelSpecs || null;
-  const pinCfg = splitResult?.pinConfig || null;
 
   const totalTriangles = (statsA.triangles || 0) + (statsB.triangles || 0);
 
   const handleDownloadPartA = () => {
     if (!splitResult?.partA?.geometry) return;
-    const suffix = pinCfg?.mode === 'holes_both' ? 'Part_1_Hole' : 'Part_1';
     downloadMeshSTL(
       splitResult.partA.geometry,
-      `${cleanName}_${suffix}.stl`,
+      filenames.part1,
       exportFormat,
       currentConfig
     );
     if (onNotify) {
-      onNotify(`Part 1 (${cleanName}_${suffix}.stl) [${exportFormat.toUpperCase()}, %${Math.round(density * 100)}] indirildi.`);
+      onNotify(`${filenames.part1} [${exportFormat.toUpperCase()}, %${Math.round(density * 100)}] indirildi.`);
     }
   };
 
   const handleDownloadPartB = () => {
     if (!splitResult?.partB?.geometry) return;
-    const suffix = pinCfg?.mode === 'holes_both' ? 'Part_2_Hole' : 'Part_2';
     downloadMeshSTL(
       splitResult.partB.geometry,
-      `${cleanName}_${suffix}.stl`,
+      filenames.part2,
       exportFormat,
       currentConfig
     );
     if (onNotify) {
-      onNotify(`Part 2 (${cleanName}_${suffix}.stl) [${exportFormat.toUpperCase()}, %${Math.round(density * 100)}] indirildi.`);
+      onNotify(`${filenames.part2} [${exportFormat.toUpperCase()}, %${Math.round(density * 100)}] indirildi.`);
     }
   };
 
@@ -103,12 +103,12 @@ export function ExportModal({
     if (!dowelGeom) return;
     downloadMeshSTL(
       dowelGeom,
-      `${cleanName}_Alignment_Dowel_Pin_D${dowelSpecs?.diameter || 8}xL${dowelSpecs?.length || 20}.stl`,
+      filenames.dowel,
       exportFormat,
       currentConfig
     );
     if (onNotify) {
-      onNotify(`Hizalama Dübel Pimi STL indirildi (Ø${dowelSpecs?.diameter || 8}mm x ${dowelSpecs?.length || 20}mm).`);
+      onNotify(`${filenames.dowel} indirildi.`);
     }
   };
 
@@ -117,12 +117,12 @@ export function ExportModal({
     downloadCombinedSTL(
       splitResult.partA,
       splitResult.partB,
-      cleanName,
+      filenames.combined.replace(/\.stl$/i, ''),
       exportFormat,
       currentConfig
     );
     if (onNotify) {
-      onNotify(`Birleştirilmiş Model (${cleanName}_Sliced_Combined.stl) [${exportFormat.toUpperCase()}] indirildi.`);
+      onNotify(`${filenames.combined} indirildi.`);
     }
   };
 
@@ -137,7 +137,7 @@ export function ExportModal({
         dowelPinGeometry: dowelGeom,
         dowelSpecs
       });
-      if (onNotify) onNotify('Tüm STL parçaları, dübel pimi ve 3D baskı kılavuzu ZIP olarak indirildi!');
+      if (onNotify) onNotify(`Tüm STL parçaları (${filenames.zip}) ZIP olarak indirildi!`);
     } catch (err) {
       console.error(err);
       if (onNotify) onNotify(`ZIP İndirme hatası: ${err.message}`);
@@ -226,6 +226,9 @@ export function ExportModal({
             statsA={statsA}
             statsB={statsB}
             totalTriangles={totalTriangles}
+            modelName={cleanName}
+            pinConfig={pinCfg}
+            onNotify={onNotify}
           />
 
           {/* Sliced Parts Cards */}
@@ -249,6 +252,9 @@ export function ExportModal({
                       </span>
                     </div>
                     <div className="text-[11px] text-gray-400 space-y-0.5 font-mono">
+                      <div className="text-[10px] text-blue-300 truncate" title={filenames.part1}>
+                        {filenames.part1}
+                      </div>
                       <div className="flex items-center gap-1">
                         <span>Üçgen:</span>
                         <span className="text-gray-200 font-bold">{statsA.projectedTriangles.toLocaleString()}</span>
@@ -263,9 +269,10 @@ export function ExportModal({
                   <button
                     onClick={handleDownloadPartA}
                     className="w-full py-2 px-3 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-xs font-semibold transition flex items-center justify-center gap-1.5 shadow-lg shadow-blue-950/40"
+                    title={filenames.part1}
                   >
                     <Download className="w-3.5 h-3.5" />
-                    <span>Part 1 STL İndir (.stl)</span>
+                    <span className="truncate">Part 1 İndir ({filenames.part1})</span>
                   </button>
                 </div>
 
@@ -282,6 +289,9 @@ export function ExportModal({
                       </span>
                     </div>
                     <div className="text-[11px] text-gray-400 space-y-0.5 font-mono">
+                      <div className="text-[10px] text-emerald-300 truncate" title={filenames.part2}>
+                        {filenames.part2}
+                      </div>
                       <div className="flex items-center gap-1">
                         <span>Üçgen:</span>
                         <span className="text-gray-200 font-bold">{statsB.projectedTriangles.toLocaleString()}</span>
@@ -296,9 +306,10 @@ export function ExportModal({
                   <button
                     onClick={handleDownloadPartB}
                     className="w-full py-2 px-3 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-semibold transition flex items-center justify-center gap-1.5 shadow-lg shadow-emerald-950/40"
+                    title={filenames.part2}
                   >
                     <Download className="w-3.5 h-3.5" />
-                    <span>Part 2 STL İndir (.stl)</span>
+                    <span className="truncate">Part 2 İndir ({filenames.part2})</span>
                   </button>
                 </div>
               </div>
@@ -312,7 +323,7 @@ export function ExportModal({
                       <span>Ayrı 3D Yazdırılabilir Dübel Pimi (Dowel Pin STL)</span>
                     </div>
                     <p className="text-[11px] text-gray-300 mt-0.5 font-mono">
-                      Ölçüler: Ø{dowelSpecs?.diameter || 8} mm Çap × {dowelSpecs?.length || 20} mm Uzunluk • Pahlı Uçlar
+                      Dosya: <span className="text-amber-400">{filenames.dowel}</span> • Ø{dowelSpecs?.diameter || 8} mm × {dowelSpecs?.length || 20} mm
                     </p>
                   </div>
 
@@ -321,7 +332,7 @@ export function ExportModal({
                     className="py-1.5 px-3 bg-gradient-to-r from-amber-600 to-orange-600 hover:from-amber-500 hover:to-orange-500 text-white rounded-lg text-xs font-bold transition flex items-center gap-1.5 shadow shrink-0 ml-2"
                   >
                     <Download className="w-3.5 h-3.5" />
-                    <span>Dübel Pimi STL İndir</span>
+                    <span>Dübel Pimi İndir</span>
                   </button>
                 </div>
               )}
@@ -333,8 +344,8 @@ export function ExportModal({
                     <Box className="w-4 h-4 text-purple-400" />
                     <span>Birleştirilmiş Modifiye Mesh (Combined Assembly)</span>
                   </div>
-                  <p className="text-[11px] text-gray-400 mt-0.5">
-                    Her iki kesilmiş parçayı tek bir STL dosyasında indirir ({((statsA.projectedTriangles || 0) + (statsB.projectedTriangles || 0)).toLocaleString()} üçgen)
+                  <p className="text-[11px] text-gray-400 mt-0.5 font-mono">
+                    {filenames.combined} • {((statsA.projectedTriangles || 0) + (statsB.projectedTriangles || 0)).toLocaleString()} üçgen
                   </p>
                 </div>
 

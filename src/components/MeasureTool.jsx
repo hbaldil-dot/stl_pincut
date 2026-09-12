@@ -2,6 +2,7 @@ import React, { useState, useMemo, useEffect } from 'react';
 import * as THREE from 'three';
 import { Line, Html } from '@react-three/drei';
 import { useThree } from '@react-three/fiber';
+import { useUnit } from '../context/UnitContext.jsx';
 
 /**
  * Interactive Precision 3D Ruler Tool.
@@ -22,6 +23,7 @@ export function MeasureTool({
   onClippingConfigChange
 }) {
   const { camera, raycaster, gl } = useThree();
+  const { unit, formatLength, formatValue, isImperial } = useUnit();
   const [hoverPoint, setHoverPoint] = useState(null);
   const [hoverNormal, setHoverNormal] = useState(null);
   const [isHovering, setIsHovering] = useState(false);
@@ -519,9 +521,9 @@ export function MeasureTool({
               <Html center distanceFactor={20}>
                 <div className="pointer-events-none -translate-x-1/2 -translate-y-8 bg-rose-950/95 border border-rose-400 text-rose-100 px-2 py-0.5 rounded-lg text-[10px] font-bold shadow-xl flex items-center gap-1 whitespace-nowrap">
                   <span>✂️ Kesit:</span>
-                  <span className="font-mono text-cyan-300">A'dan {planeIntersection.distFromA.toFixed(1)}mm</span>
+                  <span className="font-mono text-cyan-300">A'dan {formatLength(planeIntersection.distFromA, isImperial ? 3 : 1)}</span>
                   <span>|</span>
-                  <span className="font-mono text-amber-300">B'den {planeIntersection.distFromB.toFixed(1)}mm</span>
+                  <span className="font-mono text-amber-300">B'den {formatLength(planeIntersection.distFromB, isImperial ? 3 : 1)}</span>
                 </div>
               </Html>
             </group>
@@ -538,18 +540,19 @@ export function MeasureTool({
                 <span className="text-sm">📐</span>
                 <span>
                   {pointB
-                    ? `${finalDistance.toFixed(2)} mm`
-                    : `~${hoverDistance?.toFixed(2)} mm`}
+                    ? formatLength(finalDistance, isImperial ? 3 : 2)
+                    : `~${formatLength(hoverDistance, isImperial ? 3 : 2)}`}
                 </span>
               </div>
 
               {pointB && (
                 <div className="text-[9px] text-gray-300 font-mono tracking-tight flex items-center gap-1.5">
-                  <span className="text-red-400">ΔX:{Math.abs(pointB.x - pointA.x).toFixed(1)}</span>
+                  <span className="text-red-400">ΔX:{formatValue(Math.abs(pointB.x - pointA.x), isImperial ? 3 : 1)}</span>
                   <span>•</span>
-                  <span className="text-green-400">ΔY:{Math.abs(pointB.y - pointA.y).toFixed(1)}</span>
+                  <span className="text-green-400">ΔY:{formatValue(Math.abs(pointB.y - pointA.y), isImperial ? 3 : 1)}</span>
                   <span>•</span>
-                  <span className="text-blue-400">ΔZ:{Math.abs(pointB.z - pointA.z).toFixed(1)}</span>
+                  <span className="text-blue-400">ΔZ:{formatValue(Math.abs(pointB.z - pointA.z), isImperial ? 3 : 1)}</span>
+                  <span className="text-gray-400 text-[8px] uppercase">({unit})</span>
                 </div>
               )}
 
@@ -559,7 +562,7 @@ export function MeasureTool({
                   {projectedDistance !== null && (
                     <div className="text-[9px] text-sky-300 font-mono flex items-center gap-1">
                       <span>Kesit Ekseni (Δ{clippingConfig?.axis?.toUpperCase()}):</span>
-                      <strong className="text-white">{projectedDistance.toFixed(2)} mm</strong>
+                      <strong className="text-white">{formatLength(projectedDistance, isImperial ? 3 : 2)}</strong>
                     </div>
                   )}
 
@@ -640,7 +643,7 @@ export function MeasureTool({
                 <span>{!pointA ? '1. Noktayı Seçin (Nokta A)' : '2. Noktayı Seçin (Nokta B)'}</span>
               </div>
               <div className="text-[9px] font-mono text-gray-300 bg-gray-950/80 px-1 py-0.2 rounded border border-gray-800 mt-0.5">
-                [{hoverPoint.x.toFixed(1)}, {hoverPoint.y.toFixed(1)}, {hoverPoint.z.toFixed(1)}] mm
+                [{formatValue(hoverPoint.x, 1)}, {formatValue(hoverPoint.y, 1)}, {formatValue(hoverPoint.z, 1)}] {unit}
               </div>
             </div>
           </Html>

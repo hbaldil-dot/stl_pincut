@@ -5,6 +5,7 @@ import App from './App.jsx'
 import { ErrorBoundary } from './components/ErrorBoundary.jsx'
 import { ConsoleDiagnosticSummary, recordMountCheckpoint } from './components/ConsoleDiagnosticSummary.jsx'
 import { checkHardwareAcceleration } from './utils/hardwareAccelerationCheck.js'
+import { UnitProvider } from './context/UnitContext.jsx'
 
 // Record bootstrap phase checkpoint
 recordMountCheckpoint('BOOTSTRAP', 'Entrypoint', 'Application bundle loaded and parsed');
@@ -391,7 +392,9 @@ function DiagnosticRootWrapper() {
   return (
     <div style={{ width: '100%', height: '100%', position: 'relative' }}>
       <ConsoleDiagnosticSummary delayMs={500} />
-      <App />
+      <UnitProvider>
+        <App />
+      </UnitProvider>
       {showHUD && (
         <DiagnosticOverlayHUD
           stages={stages}

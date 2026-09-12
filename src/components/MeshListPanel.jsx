@@ -20,6 +20,7 @@ import {
   X
 } from 'lucide-react';
 import { MATERIAL_THEMES } from '../utils/stlLoaderHelper';
+import { useUnit } from '../context/UnitContext.jsx';
 
 /**
  * Single Mesh Item row in the Scene Outliner / Mesh Tree
@@ -38,6 +39,7 @@ function MeshItemCard({
   isActive = true,
   onFocus
 }) {
+  const { formatDimensions } = useUnit();
   const [isExpanded, setIsExpanded] = useState(false);
 
   const opacityPercent = Math.round((config.opacity ?? 1) * 100);
@@ -290,7 +292,7 @@ function MeshItemCard({
             <div className="bg-gray-950/80 p-2 rounded-lg border border-gray-800 text-[10px] font-mono text-gray-400 flex items-center justify-between">
               <span>Boyutlar:</span>
               <span className="text-gray-200">
-                {dimensions.x} × {dimensions.y} × {dimensions.z} mm
+                {formatDimensions(dimensions)}
               </span>
             </div>
           )}

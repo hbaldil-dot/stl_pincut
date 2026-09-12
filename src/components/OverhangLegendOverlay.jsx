@@ -23,7 +23,8 @@ export function OverhangLegendOverlay({
   printDirectionName = '+Y (Varsayılan Üst)',
   showBuildPlate = true,
   onToggleBuildPlate,
-  onOpenOverhangTab
+  onOpenOverhangTab,
+  onOpenOrientationModal
 }) {
   const [isMinimized, setIsMinimized] = useState(false);
 
@@ -174,7 +175,7 @@ export function OverhangLegendOverlay({
             </div>
 
             {/* Bottom Actions */}
-            <div className="flex items-center justify-between pt-1 border-t border-gray-800/80 text-[10px]">
+            <div className="flex items-center justify-between gap-1.5 pt-1 border-t border-gray-800/80 text-[10px]">
               <button
                 onClick={onToggleBuildPlate}
                 className={`px-2 py-1 rounded-lg border transition flex items-center gap-1 ${
@@ -182,18 +183,30 @@ export function OverhangLegendOverlay({
                     ? 'bg-cyan-950/50 text-cyan-300 border-cyan-800/60'
                     : 'bg-gray-800/50 text-gray-400 border-gray-700/60 hover:text-gray-200'
                 }`}
+                title="3D Yazıcı Baskı Tablasını Göster / Gizle"
               >
                 <ArrowUp className="w-3 h-3" />
-                <span>3D Tabla {showBuildPlate ? 'Açık' : 'Kapalı'}</span>
+                <span>Tabla {showBuildPlate ? 'Açık' : 'Kapalı'}</span>
               </button>
+
+              {onOpenOrientationModal && (
+                <button
+                  onClick={onOpenOrientationModal}
+                  className="px-2 py-1 bg-gradient-to-r from-indigo-600 to-teal-600 hover:from-indigo-500 hover:to-teal-500 text-white rounded-lg border border-indigo-400/40 transition flex items-center gap-1 font-semibold shadow"
+                  title="Optimal Düz Taban ve Yönelim Asistanı"
+                >
+                  <Sparkles className="w-3 h-3 text-amber-300" />
+                  <span>Düz Taban</span>
+                </button>
+              )}
 
               {onOpenOverhangTab && (
                 <button
                   onClick={onOpenOverhangTab}
                   className="px-2 py-1 bg-red-600/30 hover:bg-red-600/50 text-red-300 rounded-lg border border-red-500/40 transition flex items-center gap-1 font-semibold"
+                  title="Detaylı Overhang Ayarları"
                 >
-                  <Sparkles className="w-3 h-3" />
-                  <span>Detaylı Ayarlar</span>
+                  <span>Detaylar</span>
                 </button>
               )}
             </div>

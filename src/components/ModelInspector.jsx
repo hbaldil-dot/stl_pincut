@@ -32,6 +32,7 @@ import {
 import { downloadMetricsFile } from '../utils/exportMetrics';
 import { getComplexityTier } from './PerformanceOverlay';
 import ConfigurationHistoryLog from './ConfigurationHistoryLog';
+import { useUnit, UnitToggle } from '../context/UnitContext.jsx';
 
 const DENSITY_PRESETS = ALL_DENSITY_PRESETS;
 
@@ -49,6 +50,7 @@ export function ModelInspector({
   density: propDensity,
   onChangeDensity
 }) {
+  const { unit, formatLength, formatValue, formatVolume, isImperial } = useUnit();
   const [volumeUnit, setVolumeUnit] = useState('cm3');
   const [surfaceUnit, setSurfaceUnit] = useState('cm2');
   const [internalDensity, setInternalDensity] = useState('1.24');
@@ -203,12 +205,15 @@ export function ModelInspector({
             </div>
           </div>
 
-          <button
-            onClick={onClose}
-            className="p-1.5 text-gray-400 hover:text-white bg-gray-800/60 hover:bg-gray-800 rounded-lg border border-gray-700/60 transition"
-          >
-            <X className="w-4 h-4" />
-          </button>
+          <div className="flex items-center gap-2">
+            <UnitToggle size="xs" />
+            <button
+              onClick={onClose}
+              className="p-1.5 text-gray-400 hover:text-white bg-gray-800/60 hover:bg-gray-800 rounded-lg border border-gray-700/60 transition"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
         </div>
 
         {/* Modal Content */}
@@ -299,33 +304,33 @@ export function ModelInspector({
               <div className="bg-gray-900 p-2.5 rounded-lg border border-gray-800">
                 <span className="text-[10px] text-gray-400 block font-mono">X (Genişlik)</span>
                 <span className="text-sm font-bold text-red-400 font-mono">
-                  {((info.dimensions?.x || 0) * (isScaled ? sx : 1)).toFixed(1)} mm
+                  {formatLength((info.dimensions?.x || 0) * (isScaled ? sx : 1), isImperial ? 2 : 1)}
                 </span>
                 {isScaled && (
                   <span className="text-[9px] text-gray-500 block font-mono">
-                    (Orij: {info.dimensions?.x} mm)
+                    (Orij: {formatLength(info.dimensions?.x, isImperial ? 2 : 1)})
                   </span>
                 )}
               </div>
               <div className="bg-gray-900 p-2.5 rounded-lg border border-gray-800">
                 <span className="text-[10px] text-gray-400 block font-mono">Y (Yükseklik)</span>
                 <span className="text-sm font-bold text-green-400 font-mono">
-                  {((info.dimensions?.y || 0) * (isScaled ? sy : 1)).toFixed(1)} mm
+                  {formatLength((info.dimensions?.y || 0) * (isScaled ? sy : 1), isImperial ? 2 : 1)}
                 </span>
                 {isScaled && (
                   <span className="text-[9px] text-gray-500 block font-mono">
-                    (Orij: {info.dimensions?.y} mm)
+                    (Orij: {formatLength(info.dimensions?.y, isImperial ? 2 : 1)})
                   </span>
                 )}
               </div>
               <div className="bg-gray-900 p-2.5 rounded-lg border border-gray-800">
                 <span className="text-[10px] text-gray-400 block font-mono">Z (Derinlik)</span>
                 <span className="text-sm font-bold text-blue-400 font-mono">
-                  {((info.dimensions?.z || 0) * (isScaled ? sz : 1)).toFixed(1)} mm
+                  {formatLength((info.dimensions?.z || 0) * (isScaled ? sz : 1), isImperial ? 2 : 1)}
                 </span>
                 {isScaled && (
                   <span className="text-[9px] text-gray-500 block font-mono">
-                    (Orij: {info.dimensions?.z} mm)
+                    (Orij: {formatLength(info.dimensions?.z, isImperial ? 2 : 1)})
                   </span>
                 )}
               </div>

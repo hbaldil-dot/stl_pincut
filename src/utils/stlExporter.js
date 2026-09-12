@@ -1,5 +1,6 @@
 import JSZip from 'jszip';
 import * as THREE from 'three';
+import { generateExportFilename, EXPORT_UNITS } from './exportSettingsStorage';
 
 /**
  * Fast spatial vertex clustering and decimation algorithm for STL geometries.
@@ -230,6 +231,14 @@ export function geometryToBinarySTL(geometry, headerTitle = 'STLPinCut3D', optio
     targetGeom = simplifyGeometry(geometry, opts.density, opts);
   }
 
+  // Apply optional Unit Scale Transformation (e.g. converting mm -> in or custom multiplier)
+  const unitScale = typeof opts.unitScale === 'number' ? opts.unitScale : 1.0;
+  if (opts.applyUnitScale && Math.abs(unitScale - 1.0) > 1e-6) {
+    const scaled = targetGeom.clone();
+    scaled.scale(unitScale, unitScale, unitScale);
+    targetGeom = scaled;
+  }
+
   let nonIndexedGeom = targetGeom.index ? targetGeom.toNonIndexed() : targetGeom.clone();
 
   if (!nonIndexedGeom.attributes.normal) {
@@ -300,6 +309,14 @@ export function geometryToAsciiSTL(geometry, solidName = 'STLPinCut3D', options 
   let targetGeom = geometry;
   if (opts.density && opts.density < 0.98) {
     targetGeom = simplifyGeometry(geometry, opts.density, opts);
+  }
+
+  // Apply optional Unit Scale Transformation (e.g. converting mm -> in or custom multiplier)
+  const unitScale = typeof opts.unitScale === 'number' ? opts.unitScale : 1.0;
+  if (opts.applyUnitScale && Math.abs(unitScale - 1.0) > 1e-6) {
+    const scaled = targetGeom.clone();
+    scaled.scale(unitScale, unitScale, unitScale);
+    targetGeom = scaled;
   }
 
   let nonIndexedGeom = targetGeom.index ? targetGeom.toNonIndexed() : targetGeom.clone();
@@ -457,35 +474,73 @@ export async function downloadAllPartsZip(partA, partB, baseName = 'STL_PinCut_M
   const exportOpts = {
     density,
     decimalPrecision,
-    format
+    format,
+    unitScale: options.unitScale,
+    applyUnitScale: options.applyUnitScale,
+    unit: options.unit
   };
+
+  const part1Filename = generateExportFilename({
+    modelName: cleanBase,
+    partType: 'part1',
+    config: options,
+    extension: '.stl'
+  });
+
+  const part2Filename = generateExportFilename({
+    modelName: cleanBase,
+    partType: 'part2',
+    config: options,
+    extension: '.stl'
+  });
+
+  const dowelFilename = generateExportFilename({
+    modelName: cleanBase,
+    partType: 'dowel',
+    config: options,
+    extension: '.stl'
+  });
+
+  const combinedFilename = generateExportFilename({
+    modelName: cleanBase,
+    partType: 'combined',
+    config: options,
+    extension: '.stl'
+  });
+
+  const zipPkgFilename = generateExportFilename({
+    modelName: cleanBase,
+    partType: 'zip',
+    config: options,
+    extension: '.zip'
+  });
 
   if (partA && partA.geometry) {
     if (format === 'ascii') {
-      const asciiA = geometryToAsciiSTL(partA.geometry, `${cleanBase}_Part_1`, exportOpts);
-      zip.file(`${cleanBase}_Part_1.stl`, asciiA);
+      const asciiA = geometryToAsciiSTL(partA.geometry, part1Filename.replace('.stl', ''), exportOpts);
+      zip.file(part1Filename, asciiA);
     } else {
-      const bufferA = geometryToBinarySTL(partA.geometry, `${cleanBase}_Part_1`, exportOpts);
-      zip.file(`${cleanBase}_Part_1.stl`, bufferA);
+      const bufferA = geometryToBinarySTL(partA.geometry, part1Filename.replace('.stl', ''), exportOpts);
+      zip.file(part1Filename, bufferA);
     }
   }
 
   if (partB && partB.geometry) {
     if (format === 'ascii') {
-      const asciiB = geometryToAsciiSTL(partB.geometry, `${cleanBase}_Part_2`, exportOpts);
-      zip.file(`${cleanBase}_Part_2.stl`, asciiB);
+      const asciiB = geometryToAsciiSTL(partB.geometry, part2Filename.replace('.stl', ''), exportOpts);
+      zip.file(part2Filename, asciiB);
     } else {
-      const bufferB = geometryToBinarySTL(partB.geometry, `${cleanBase}_Part_2`, exportOpts);
-      zip.file(`${cleanBase}_Part_2.stl`, bufferB);
+      const bufferB = geometryToBinarySTL(partB.geometry, part2Filename.replace('.stl', ''), exportOpts);
+      zip.file(part2Filename, bufferB);
     }
   }
 
   // Include Standalone Dowel Pin if available
   if (dowelPinGeometry) {
     if (format === 'ascii') {
-      zip.file(`${cleanBase}_Alignment_Dowel_Pin.stl`, geometryToAsciiSTL(dowelPinGeometry, `${cleanBase}_Dowel_Pin`, exportOpts));
+      zip.file(dowelFilename, geometryToAsciiSTL(dowelPinGeometry, dowelFilename.replace('.stl', ''), exportOpts));
     } else {
-      zip.file(`${cleanBase}_Alignment_Dowel_Pin.stl`, geometryToBinarySTL(dowelPinGeometry, `${cleanBase}_Dowel_Pin`, exportOpts));
+      zip.file(dowelFilename, geometryToBinarySTL(dowelPinGeometry, dowelFilename.replace('.stl', ''), exportOpts));
     }
   }
 
@@ -493,9 +548,9 @@ export async function downloadAllPartsZip(partA, partB, baseName = 'STL_PinCut_M
   if (options.includeCombined !== false && partA?.geometry && partB?.geometry) {
     const merged = mergeGeometries([partA.geometry, partB.geometry]);
     if (format === 'ascii') {
-      zip.file(`${cleanBase}_Combined_Assembly.stl`, geometryToAsciiSTL(merged, `${cleanBase}_Combined`, exportOpts));
+      zip.file(combinedFilename, geometryToAsciiSTL(merged, combinedFilename.replace('.stl', ''), exportOpts));
     } else {
-      zip.file(`${cleanBase}_Combined_Assembly.stl`, geometryToBinarySTL(merged, `${cleanBase}_Combined`, exportOpts));
+      zip.file(combinedFilename, geometryToBinarySTL(merged, combinedFilename.replace('.stl', ''), exportOpts));
     }
   }
 
@@ -503,31 +558,34 @@ export async function downloadAllPartsZip(partA, partB, baseName = 'STL_PinCut_M
   const statsB = calculateGeometryStats(partB?.geometry, density);
 
   // Readme info for 3D printing
+  const unitLabel = options.unit ? `${options.unit.toUpperCase()} (${options.applyUnitScale ? `Ölçek: ${options.unitScale || 1.0}x` : '1.0x'})` : 'MM (1.0x)';
   const infoText = `=====================================================
 STL PinCut 3D - 3D Printing & Assembly Package
 =====================================================
 Model Name: ${cleanBase}
 Export Date: ${new Date().toISOString()}
 Export Format: ${format.toUpperCase()} STL
+Units: ${unitLabel}
 Mesh Density (Precision): ${Math.round(density * 100)}% (${density >= 0.98 ? 'Original CAD Resolution' : `Optimized with ${statsA.savingsPercent}% polygon reduction`})
 ${format === 'ascii' ? `ASCII Float Precision: ${decimalPrecision} decimals` : ''}
+Naming Convention: ${options.namingPattern || '{name}_{part}'} (${options.caseConvention || 'as_is'})
 
 Files Included:
-1. ${cleanBase}_Part_1.stl
+1. ${part1Filename}
    - Original Triangles: ${statsA.triangles.toLocaleString()}
    - Exported Triangles: ${statsA.projectedTriangles.toLocaleString()}
    - Features: Watertight planar cap with alignment features.
    
-2. ${cleanBase}_Part_2.stl
+2. ${part2Filename}
    - Original Triangles: ${statsB.triangles.toLocaleString()}
    - Exported Triangles: ${statsB.projectedTriangles.toLocaleString()}
    - Features: Watertight planar cap with matching cylindrical socket hole(s).
 
-${dowelPinGeometry ? `3. ${cleanBase}_Alignment_Dowel_Pin.stl
+${dowelPinGeometry ? `3. ${dowelFilename}
    - Specs: Diameter Ø${dowelSpecs?.diameter || 8}mm x Length ${dowelSpecs?.length || 20}mm (Chamfered tips)
    - Usage: Print separately to securely lock Part 1 and Part 2 together.
 ` : ''}
-4. ${cleanBase}_Combined_Assembly.stl
+4. ${combinedFilename}
    - Complete modified mesh with both sliced halves.
 
 -----------------------------------------------------
@@ -543,7 +601,7 @@ Recommended 3D Slicer Settings (Cura / Prusa / Bambu / Orca):
   zip.file(`README_3D_PRINTING.txt`, infoText);
 
   const zipBlob = await zip.generateAsync({ type: 'blob' });
-  downloadBlob(zipBlob, `${cleanBase}_PinCut_3D_Package.zip`);
+  downloadBlob(zipBlob, zipPkgFilename);
 }
 
 /**
@@ -624,7 +682,9 @@ export async function downloadBatchProcessedZip(completedItems, sharedSettings =
   const clippingConfig = sharedSettings.clippingConfig || {};
   const pinConfig = sharedSettings.pinConfig || {};
   const planeAxis = clippingConfig.axis?.toUpperCase() || 'Y';
-  const planeOffset = clippingConfig.offset || 0;
+  const planeOffset = clippingConfig.offsetMode === 'percentage'
+    ? `%${clippingConfig.offset ?? 50} (Model Yükseklik Oranı)`
+    : `${clippingConfig.offset || 0} mm`;
   const pinDiameter = pinConfig.diameter || pinConfig.size || 8;
   const pinDepth = pinConfig.depth || pinConfig.height || 10;
   const pinClearance = typeof pinConfig.clearance === 'number' ? pinConfig.clearance : 0.2;
@@ -640,7 +700,7 @@ Format: ${format.toUpperCase()} STL (Hassasiyet/Yogunluk: %${Math.round(density 
 
 UYGULANAN ORTAK KESME DUZLEMI AYARLARI:
 - Kesim Ekseni: ${planeAxis}-Ekseni
-- Duzlem Ofseti: ${planeOffset} mm
+- Duzlem Ofseti / Konumu: ${planeOffset}
 - Normal Yonu: ${clippingConfig.negate ? 'Ters Cevrilmis (-)' : 'Standart (+)'}
 - Hizalama Pimi/Deligi: ${clippingConfig.addPinOnSlice !== false ? 'Aktif' : 'Pasif'}
 

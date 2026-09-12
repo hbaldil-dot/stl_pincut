@@ -42,6 +42,7 @@ import {
   INFILL_PRESETS,
   calculateSplitPartsVolumeStats
 } from '../utils/volumeCalculator';
+import { useUnit, UnitToggle } from '../context/UnitContext.jsx';
 
 export function VolumeMaterialTool({
   model,
@@ -54,14 +55,29 @@ export function VolumeMaterialTool({
   modelScale = { x: 1, y: 1, z: 1 },
   onResetScale
 }) {
+  const { unit: globalUnit, isImperial } = useUnit();
+
   // Volume unit state: 'cm3' | 'mm3' | 'in3'
-  const [unit, setUnit] = useState('cm3');
+  const [unit, setUnit] = useState(() => (isImperial ? 'in3' : 'cm3'));
 
   // Surface area unit state: 'cm2' | 'mm2' | 'in2' | 'dm2'
-  const [surfaceUnit, setSurfaceUnit] = useState('cm2');
+  const [surfaceUnit, setSurfaceUnit] = useState(() => (isImperial ? 'in2' : 'cm2'));
 
   // Mass unit state: 'g' | 'kg' | 'oz'
-  const [massUnit, setMassUnit] = useState('g');
+  const [massUnit, setMassUnit] = useState(() => (isImperial ? 'oz' : 'g'));
+
+  // Sync with global unit when user changes toggle
+  React.useEffect(() => {
+    if (isImperial) {
+      setUnit('in3');
+      setSurfaceUnit('in2');
+      setMassUnit('oz');
+    } else {
+      setUnit('cm3');
+      setSurfaceUnit('cm2');
+      setMassUnit('g');
+    }
+  }, [isImperial]);
 
   // Surface Analysis Section collapse/expand
   const [isSurfaceDetailsOpen, setIsSurfaceDetailsOpen] = useState(true);

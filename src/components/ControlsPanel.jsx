@@ -66,6 +66,8 @@ import { VolumeMaterialTool } from './VolumeMaterialTool';
 import { getComplexityTier } from './PerformanceOverlay';
 import ConfigurationHistoryLog from './ConfigurationHistoryLog';
 import { loadConfigHistory, downloadConfigComparisonCSV } from '../utils/configHistoryStorage';
+import { useUnit, UnitToggle } from '../context/UnitContext.jsx';
+import { resolveAllFilenames } from '../utils/exportSettingsStorage';
 
 export function ControlsPanel({
   modelName,
@@ -85,6 +87,18 @@ export function ControlsPanel({
   onClearDrawing,
   onUndoPoint,
   isLoopClosed,
+  // Raycaster Lasso Face & Vertex Selection props
+  selectedFacesCount = 0,
+  selectedVerticesCount = 0,
+  lassoSelectionStats = { surfaceArea: 0 },
+  onClearFaceSelection,
+  onInvertFaceSelection,
+  onSelectAllFaces,
+  onDeleteSelectedFaces,
+  lassoFrontFacingOnly = true,
+  onToggleFrontFacing,
+  lassoSelectionMode = 'replace',
+  onChangeSelectionMode,
   pinConfig,
   onPinConfigChange,
   // Slicing & Exploded props
@@ -136,6 +150,8 @@ export function ControlsPanel({
   onStepRotate,
   onResetRotation,
   onAlignFlat,
+  onOpenOrientationModal,
+  onApplyModelRotation,
   isRotateGizmoActive = false,
   onToggleRotateGizmo,
   snapAngle = null,
@@ -172,6 +188,7 @@ export function ControlsPanel({
   batchQueue = [],
   onOpenBatchModal,
   onUpdateBatchQueue,
+  onUpdateQueue,
   isBatchProcessing = false,
   currentBatchProcessingId = null,
   onStartBatchProcessing,
@@ -181,8 +198,14 @@ export function ControlsPanel({
   onLoadBatchItemInViewport,
   onAddBatchFiles,
   onAddAllBatchPresets,
-  onClearBatchQueue
+  onClearBatchQueue,
+  batchSettings,
+  onBatchSettingsChange,
+  onSyncBatchWithViewport,
+  onApplyBatchToViewport,
+  onNotify = null
 }) {
+  const { unit, formatLength, formatValue, isImperial } = useUnit();
   const [isPresetsOpen, setIsPresetsOpen] = useState(false);
   const [internalActiveTab, setInternalActiveTab] = useState('slice'); // 'slice' | 'rotate' | 'overhang' | 'measure' | 'material' | 'export'
   const activeTab = currentTab || internalActiveTab;
@@ -405,7 +428,7 @@ export function ControlsPanel({
 
   const handleCopyMeasurement = () => {
     if (!measuredDistance) return;
-    const text = `${measuredDistance.toFixed(2)} mm (ΔX: ${deltaCoords.dx.toFixed(2)}mm, ΔY: ${deltaCoords.dy.toFixed(2)}mm, ΔZ: ${deltaCoords.dz.toFixed(2)}mm)`;
+    const text = `${formatLength(measuredDistance, isImperial ? 3 : 2)} (ΔX: ${formatLength(deltaCoords.dx, isImperial ? 3 : 2)}, ΔY: ${formatLength(deltaCoords.dy, isImperial ? 3 : 2)}, ΔZ: ${formatLength(deltaCoords.dz, isImperial ? 3 : 2)})`;
     navigator.clipboard?.writeText(text);
     setIsCopied(true);
     setTimeout(() => setIsCopied(false), 2000);
@@ -606,6 +629,11 @@ export function ControlsPanel({
               {meshCount}
             </span>
           </button>
+
+          <div className="w-[1px] h-4 bg-gray-800 mx-0.5" />
+
+          {/* Global Unit Toggle (mm / in) */}
+          <UnitToggle size="xs" />
         </div>
       </div>
 
@@ -1096,22 +1124,24 @@ export function ControlsPanel({
                         <span>3D Cetvel Ölçüm Hizalaması</span>
                       </span>
                       <span className="font-mono text-[10px] text-cyan-200 font-bold">
-                        {measuredDistance?.toFixed(2)} mm
+                        {measuredDistance !== null ? formatLength(measuredDistance, isImperial ? 3 : 2) : '—'}
                       </span>
                     </div>
 
                     <div className="text-[10px] text-gray-400 font-mono flex items-center justify-between">
                       <span>Eksen Boyunca Mesafe:</span>
-                      <span className="text-white font-bold">{projectedDistanceAlongCut?.toFixed(2)} mm</span>
+                      <span className="text-white font-bold">
+                        {projectedDistanceAlongCut !== null ? formatLength(projectedDistanceAlongCut, isImperial ? 3 : 2) : '—'}
+                      </span>
                     </div>
 
                     {planeDistA !== null && planeDistB !== null && (
                       <div className="grid grid-cols-2 gap-1 text-[9px] font-mono">
                         <div className="bg-gray-900/80 px-1.5 py-0.5 rounded border border-gray-800 text-gray-300">
-                          A: <span className="text-cyan-400">{planeDistA >= 0 ? '+' : ''}{planeDistA.toFixed(1)} mm</span>
+                          A: <span className="text-cyan-400">{planeDistA >= 0 ? '+' : ''}{formatLength(planeDistA, isImperial ? 3 : 1)}</span>
                         </div>
                         <div className="bg-gray-900/80 px-1.5 py-0.5 rounded border border-gray-800 text-gray-300">
-                          B: <span className="text-amber-400">{planeDistB >= 0 ? '+' : ''}{planeDistB.toFixed(1)} mm</span>
+                          B: <span className="text-amber-400">{planeDistB >= 0 ? '+' : ''}{formatLength(planeDistB, isImperial ? 3 : 1)}</span>
                         </div>
                       </div>
                     )}
@@ -1302,6 +1332,82 @@ export function ControlsPanel({
                   )}
                 </div>
               )}
+
+              {/* Raycaster Surface Selection Stats & Controls */}
+              <div className="bg-gray-950/60 rounded-xl p-3 border border-gray-800 flex flex-col gap-2.5">
+                <div className="flex items-center justify-between text-[11px] font-semibold text-gray-300">
+                  <span className="flex items-center gap-1">
+                    <Target className="w-3.5 h-3.5 text-amber-400" />
+                    <span>Yüzey & Köşe Seçimi</span>
+                  </span>
+                  <button
+                    onClick={onToggleFrontFacing}
+                    className={`px-2 py-0.5 rounded text-[10px] font-medium border transition ${
+                      lassoFrontFacingOnly
+                        ? 'bg-blue-600/20 text-blue-300 border-blue-500/40'
+                        : 'bg-gray-800 text-gray-400 border-gray-700'
+                    }`}
+                    title={lassoFrontFacingOnly ? 'Yalnızca ön yüzeyler' : 'Tüm yüzeyler'}
+                  >
+                    {lassoFrontFacingOnly ? 'Ön Yüz Filtresi' : 'Tümü'}
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-3 gap-2 text-center bg-gray-900/80 p-2 rounded-lg border border-gray-800/80">
+                  <div>
+                    <div className="text-[9px] text-gray-400 uppercase font-medium">Yüzey</div>
+                    <div className="text-xs font-bold text-amber-400 font-mono">
+                      {selectedFacesCount.toLocaleString()}
+                    </div>
+                  </div>
+                  <div className="border-l border-gray-800">
+                    <div className="text-[9px] text-gray-400 uppercase font-medium">Köşe</div>
+                    <div className="text-xs font-bold text-cyan-400 font-mono">
+                      {selectedVerticesCount.toLocaleString()}
+                    </div>
+                  </div>
+                  <div className="border-l border-gray-800">
+                    <div className="text-[9px] text-gray-400 uppercase font-medium">Alan</div>
+                    <div className="text-xs font-bold text-emerald-400 font-mono truncate">
+                      {lassoSelectionStats?.surfaceArea ? `${lassoSelectionStats.surfaceArea} mm²` : '0 mm²'}
+                    </div>
+                  </div>
+                </div>
+
+                {selectedFacesCount > 0 ? (
+                  <div className="flex items-center gap-1.5 pt-1">
+                    <button
+                      onClick={onClearFaceSelection}
+                      className="flex-1 py-1.5 px-2 bg-gray-800 hover:bg-gray-700 text-gray-300 rounded-lg text-[10px] font-medium transition flex items-center justify-center gap-1 border border-gray-700"
+                    >
+                      <RotateCcw className="w-3 h-3 text-gray-400" />
+                      <span>Temizle</span>
+                    </button>
+                    <button
+                      onClick={onInvertFaceSelection}
+                      className="flex-1 py-1.5 px-2 bg-gray-800 hover:bg-gray-700 text-gray-300 rounded-lg text-[10px] font-medium transition flex items-center justify-center gap-1 border border-gray-700"
+                    >
+                      <Layers className="w-3 h-3 text-cyan-400" />
+                      <span>Tersine</span>
+                    </button>
+                    <button
+                      onClick={onDeleteSelectedFaces}
+                      className="py-1.5 px-2 bg-red-950/60 hover:bg-red-900/60 text-red-300 rounded-lg text-[10px] font-medium transition flex items-center justify-center gap-1 border border-red-800/60"
+                    >
+                      <Trash2 className="w-3 h-3 text-red-400" />
+                      <span>Sil</span>
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    onClick={onSelectAllFaces}
+                    className="w-full py-1.5 px-2 bg-gray-800 hover:bg-gray-700 text-gray-300 rounded-lg text-[10px] font-medium transition flex items-center justify-center gap-1 border border-gray-700"
+                  >
+                    <Maximize2 className="w-3 h-3 text-blue-400" />
+                    <span>Tüm Modeli Seç</span>
+                  </button>
+                )}
+              </div>
             </div>
           )}
 
@@ -2619,10 +2725,23 @@ export function ControlsPanel({
 
           {/* Quick Bed Alignment Presets Card */}
           <div className="bg-gray-950/40 p-3.5 rounded-xl border border-gray-800 flex flex-col gap-2.5">
-            <div className="text-xs font-semibold text-gray-300 flex items-center gap-1.5">
-              <Target className="w-3.5 h-3.5 text-emerald-400" />
-              <span>Hızlı Hizalama ve Yerleşim Presetleri</span>
+            <div className="text-xs font-semibold text-gray-300 flex items-center justify-between">
+              <span className="flex items-center gap-1.5">
+                <Target className="w-3.5 h-3.5 text-emerald-400" />
+                <span>Hızlı Hizalama ve Yerleşim Presetleri</span>
+              </span>
+              <span className="text-[10px] text-indigo-400 font-mono">Düz Taban</span>
             </div>
+
+            {/* AI Automated Flat-Bottom Orientation Assistant Button */}
+            <button
+              onClick={onOpenOrientationModal}
+              className="w-full py-2.5 px-3 bg-gradient-to-r from-indigo-600 via-indigo-500 to-teal-600 hover:from-indigo-500 hover:to-teal-500 text-white rounded-xl text-xs font-bold transition flex items-center justify-center gap-2 shadow-lg shadow-indigo-950/80 active:scale-98 border border-indigo-400/30"
+              title="STL yüzey geometrisini analiz ederek en az destek gerektiren optimal düz taban açısını bul ve uygula"
+            >
+              <Sparkles className="w-4 h-4 text-amber-300 animate-pulse" />
+              <span>Otomatik Düz Taban Asistanı (En Az Destek)</span>
+            </button>
 
             <div className="grid grid-cols-2 gap-2">
               <button
@@ -2704,16 +2823,21 @@ export function ControlsPanel({
               <Ruler className="w-24 h-24 text-cyan-400" />
             </div>
 
-            <div className="text-[11px] font-semibold text-cyan-400 uppercase tracking-wider flex items-center gap-1.5">
-              <span className="w-2 h-2 rounded-full bg-cyan-400" />
-              <span>Toplam 3D Mesafe (Euclidean)</span>
+            <div className="flex items-center justify-between">
+              <div className="text-[11px] font-semibold text-cyan-400 uppercase tracking-wider flex items-center gap-1.5">
+                <span className="w-2 h-2 rounded-full bg-cyan-400" />
+                <span>Toplam 3D Mesafe (Euclidean)</span>
+              </div>
+              <UnitToggle size="xs" />
             </div>
 
             <div className="my-2 flex items-baseline gap-2">
               <span className="text-3xl font-bold font-mono text-white tracking-tight">
-                {measuredDistance !== null ? measuredDistance.toFixed(2) : '—'}
+                {measuredDistance !== null ? formatValue(measuredDistance, isImperial ? 3 : 2) : '—'}
               </span>
-              <span className="text-sm font-semibold text-cyan-300 font-mono">milimetre (mm)</span>
+              <span className="text-sm font-semibold text-cyan-300 font-mono">
+                {isImperial ? 'inç (in)' : 'milimetre (mm)'}
+              </span>
             </div>
 
             {/* Delta Coordinates Breakdown */}
@@ -2722,19 +2846,19 @@ export function ControlsPanel({
                 <div className="bg-gray-950/60 p-2 rounded-lg border border-red-950/80">
                   <div className="text-[10px] text-red-400 font-semibold">ΔX Ekseni</div>
                   <div className="text-xs font-mono font-bold text-gray-200">
-                    {deltaCoords.dx.toFixed(2)} <span className="text-[10px] text-gray-500 font-normal">mm</span>
+                    {formatValue(deltaCoords.dx, isImperial ? 3 : 1)} <span className="text-[10px] text-gray-500 font-normal">{unit}</span>
                   </div>
                 </div>
                 <div className="bg-gray-950/60 p-2 rounded-lg border border-green-950/80">
                   <div className="text-[10px] text-green-400 font-semibold">ΔY Ekseni</div>
                   <div className="text-xs font-mono font-bold text-gray-200">
-                    {deltaCoords.dy.toFixed(2)} <span className="text-[10px] text-gray-500 font-normal">mm</span>
+                    {formatValue(deltaCoords.dy, isImperial ? 3 : 1)} <span className="text-[10px] text-gray-500 font-normal">{unit}</span>
                   </div>
                 </div>
                 <div className="bg-gray-950/60 p-2 rounded-lg border border-blue-950/80">
                   <div className="text-[10px] text-blue-400 font-semibold">ΔZ Ekseni</div>
                   <div className="text-xs font-mono font-bold text-gray-200">
-                    {deltaCoords.dz.toFixed(2)} <span className="text-[10px] text-gray-500 font-normal">mm</span>
+                    {formatValue(deltaCoords.dz, isImperial ? 3 : 1)} <span className="text-[10px] text-gray-500 font-normal">{unit}</span>
                   </div>
                 </div>
               </div>
@@ -2785,7 +2909,7 @@ export function ControlsPanel({
                 {projectedDistanceAlongCut !== null && (
                   <div className="flex items-center justify-between p-2 rounded-lg bg-gray-900/80 border border-gray-800 text-xs font-mono">
                     <span className="text-gray-400">Kesit Ekseni Boyunca (Δ{clippingConfig?.axis?.toUpperCase()}):</span>
-                    <span className="text-white font-bold">{projectedDistanceAlongCut.toFixed(2)} mm</span>
+                    <span className="text-white font-bold">{formatLength(projectedDistanceAlongCut, isImperial ? 3 : 2)}</span>
                   </div>
                 )}
 
@@ -2795,7 +2919,7 @@ export function ControlsPanel({
                     <div className="p-2 rounded-lg bg-cyan-950/30 border border-cyan-900/40">
                       <div className="text-[10px] text-cyan-400">Nokta A → Düzlem</div>
                       <div className="text-sm font-bold text-white mt-0.5">
-                        {planeDistA >= 0 ? '+' : ''}{planeDistA.toFixed(1)} mm
+                        {planeDistA >= 0 ? '+' : ''}{formatLength(planeDistA, isImperial ? 3 : 1)}
                       </div>
                       <div className="text-[9px] text-gray-400">
                         {planeDistA >= 0 ? 'Düzlemin Üstünde' : 'Düzlemin Altında'}
@@ -2804,7 +2928,7 @@ export function ControlsPanel({
                     <div className="p-2 rounded-lg bg-amber-950/30 border border-amber-900/40">
                       <div className="text-[10px] text-amber-400">Nokta B → Düzlem</div>
                       <div className="text-sm font-bold text-white mt-0.5">
-                        {planeDistB >= 0 ? '+' : ''}{planeDistB.toFixed(1)} mm
+                        {planeDistB >= 0 ? '+' : ''}{formatLength(planeDistB, isImperial ? 3 : 1)}
                       </div>
                       <div className="text-[9px] text-gray-400">
                         {planeDistB >= 0 ? 'Düzlemin Üstünde' : 'Düzlemin Altında'}
@@ -2879,7 +3003,7 @@ export function ControlsPanel({
               </div>
               <div className="font-mono text-[11px] text-gray-300">
                 {measurePointA
-                  ? `[${measurePointA.x.toFixed(1)}, ${measurePointA.y.toFixed(1)}, ${measurePointA.z.toFixed(1)}] mm`
+                  ? `[${formatValue(measurePointA.x, isImperial ? 2 : 1)}, ${formatValue(measurePointA.y, isImperial ? 2 : 1)}, ${formatValue(measurePointA.z, isImperial ? 2 : 1)}] ${unit}`
                   : 'Seçilmedi'}
               </div>
             </div>
@@ -2892,7 +3016,7 @@ export function ControlsPanel({
               </div>
               <div className="font-mono text-[11px] text-gray-300">
                 {measurePointB
-                  ? `[${measurePointB.x.toFixed(1)}, ${measurePointB.y.toFixed(1)}, ${measurePointB.z.toFixed(1)}] mm`
+                  ? `[${formatValue(measurePointB.x, isImperial ? 2 : 1)}, ${formatValue(measurePointB.y, isImperial ? 2 : 1)}, ${formatValue(measurePointB.z, isImperial ? 2 : 1)}] ${unit}`
                   : 'Seçilmedi'}
               </div>
             </div>
@@ -2930,15 +3054,15 @@ export function ControlsPanel({
               <div className="grid grid-cols-3 gap-2 text-center text-xs font-mono text-gray-300">
                 <div className="bg-gray-900 p-1.5 rounded border border-gray-800">
                   <span className="text-gray-500 text-[10px]">X (Genişlik):</span>
-                  <div className="font-bold text-red-400">{modelInfo.dimensions.x} mm</div>
+                  <div className="font-bold text-red-400">{formatLength(modelInfo.dimensions.x, isImperial ? 2 : 1)}</div>
                 </div>
                 <div className="bg-gray-900 p-1.5 rounded border border-gray-800">
                   <span className="text-gray-500 text-[10px]">Y (Yükseklik):</span>
-                  <div className="font-bold text-green-400">{modelInfo.dimensions.y} mm</div>
+                  <div className="font-bold text-green-400">{formatLength(modelInfo.dimensions.y, isImperial ? 2 : 1)}</div>
                 </div>
                 <div className="bg-gray-900 p-1.5 rounded border border-gray-800">
                   <span className="text-gray-500 text-[10px]">Z (Derinlik):</span>
-                  <div className="font-bold text-blue-400">{modelInfo.dimensions.z} mm</div>
+                  <div className="font-bold text-blue-400">{formatLength(modelInfo.dimensions.z, isImperial ? 2 : 1)}</div>
                 </div>
               </div>
               <div className="text-[10px] text-gray-400 flex items-center justify-between">
@@ -3313,6 +3437,8 @@ export function ControlsPanel({
           onChangeHeatmapConfig={onChangeHeatmapConfig}
           onApplyModelRotationAsPrintDir={onApplyModelRotationAsPrintDir}
           overhangStats={overhangStats}
+          onApplyModelRotation={onApplyModelRotation}
+          onOpenOrientationModal={onOpenOrientationModal}
         />
       )}
 
@@ -3332,7 +3458,7 @@ export function ControlsPanel({
             </button>
           </div>
 
-          {/* Export Configuration Panel (Density / Precision + Format) */}
+          {/* Export Configuration Panel (Density / Precision + Format + Units + Naming Presets) */}
           {exportConfig && onChangeExportConfig && (
             <ExportConfigPanel
               config={exportConfig}
@@ -3340,96 +3466,124 @@ export function ControlsPanel({
               statsA={statsA}
               statsB={statsB}
               totalTriangles={(statsA?.triangles || 0) + (statsB?.triangles || 0)}
+              modelName={modelInfo?.name || modelName || 'Model'}
+              pinConfig={pinConfig}
               compact={true}
+              onNotify={onNotify}
             />
           )}
 
-          {/* Part 1 Box */}
-          <div className="bg-blue-950/30 border border-blue-800/40 rounded-xl p-3 space-y-2">
-            <div className="flex justify-between items-center text-xs">
-              <span className="font-bold text-blue-300 flex items-center gap-1.5">
-                <span className="w-2 h-2 rounded-full bg-blue-500" />
-                Part 1
-              </span>
-              {statsA && (
-                <span className="font-mono text-[10px] text-blue-400">
-                  {exportConfig?.format === 'ascii' ? statsA.asciiSizeFormatted : statsA.binarySizeFormatted}
-                </span>
-              )}
-            </div>
-            <p className="text-[10px] text-gray-400 font-mono">
-              {statsA?.triangles.toLocaleString()} üçgen • Su sızdırmaz düzlem
-            </p>
-            <button
-              onClick={onExportPartA}
-              className="w-full py-1.5 px-3 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-xs font-semibold transition flex items-center justify-center gap-1.5"
-            >
-              <Download className="w-3.5 h-3.5" />
-              Part 1 STL İndir ({exportConfig?.format?.toUpperCase() || 'BINARY'})
-            </button>
-          </div>
+          {(() => {
+            const currentFilenames = resolveAllFilenames(
+              modelInfo?.name || modelName || 'Model',
+              exportConfig,
+              pinConfig
+            );
 
-          {/* Part 2 Box */}
-          <div className="bg-emerald-950/30 border border-emerald-800/40 rounded-xl p-3 space-y-2">
-            <div className="flex justify-between items-center text-xs">
-              <span className="font-bold text-emerald-300 flex items-center gap-1.5">
-                <span className="w-2 h-2 rounded-full bg-emerald-500" />
-                Part 2 (Silindirik Soket Delikli)
-              </span>
-              {statsB && (
-                <span className="font-mono text-[10px] text-emerald-400">
-                  {exportConfig?.format === 'ascii' ? statsB.asciiSizeFormatted : statsB.binarySizeFormatted}
-                </span>
-              )}
-            </div>
-            <p className="text-[10px] text-gray-400 font-mono">
-              {statsB?.triangles.toLocaleString()} üçgen • Silindirik hizalama deliği
-            </p>
-            <button
-              onClick={onExportPartB}
-              className="w-full py-1.5 px-3 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-semibold transition flex items-center justify-center gap-1.5"
-            >
-              <Download className="w-3.5 h-3.5" />
-              Part 2 STL İndir ({exportConfig?.format?.toUpperCase() || 'BINARY'})
-            </button>
-          </div>
+            return (
+              <>
+                {/* Part 1 Box */}
+                <div className="bg-blue-950/30 border border-blue-800/40 rounded-xl p-3 space-y-2">
+                  <div className="flex justify-between items-center text-xs">
+                    <span className="font-bold text-blue-300 flex items-center gap-1.5">
+                      <span className="w-2 h-2 rounded-full bg-blue-500" />
+                      Part 1
+                    </span>
+                    {statsA && (
+                      <span className="font-mono text-[10px] text-blue-400">
+                        {exportConfig?.format === 'ascii' ? statsA.asciiSizeFormatted : statsA.binarySizeFormatted}
+                      </span>
+                    )}
+                  </div>
+                  <div className="text-[10px] text-blue-300 font-mono truncate" title={currentFilenames.part1}>
+                    {currentFilenames.part1}
+                  </div>
+                  <p className="text-[10px] text-gray-400 font-mono">
+                    {statsA?.triangles.toLocaleString()} üçgen • Su sızdırmaz düzlem
+                  </p>
+                  <button
+                    onClick={onExportPartA}
+                    className="w-full py-1.5 px-3 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-xs font-semibold transition flex items-center justify-center gap-1.5"
+                    title={currentFilenames.part1}
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    <span className="truncate">Part 1 İndir ({currentFilenames.part1})</span>
+                  </button>
+                </div>
 
-          {/* Standalone Dowel Pin */}
-          {dowelGeom && (
-            <div className="bg-amber-950/30 border border-amber-800/40 rounded-xl p-3 space-y-2">
-              <div className="flex justify-between items-center text-xs">
-                <span className="font-bold text-amber-300 flex items-center gap-1.5">
-                  <CircleDot className="w-3.5 h-3.5 text-amber-400" />
-                  Dübel Pimi STL (Ø{dowelSpecs?.diameter || 8}mm × {dowelSpecs?.length || 20}mm)
-                </span>
-              </div>
-              <button
-                onClick={onExportDowelPin}
-                className="w-full py-1.5 px-3 bg-gradient-to-r from-amber-600 to-orange-600 hover:from-amber-500 hover:to-orange-500 text-white rounded-lg text-xs font-bold transition flex items-center justify-center gap-1.5"
-              >
-                <Download className="w-3.5 h-3.5" />
-                Dübel Pimi STL İndir
-              </button>
-            </div>
-          )}
+                {/* Part 2 Box */}
+                <div className="bg-emerald-950/30 border border-emerald-800/40 rounded-xl p-3 space-y-2">
+                  <div className="flex justify-between items-center text-xs">
+                    <span className="font-bold text-emerald-300 flex items-center gap-1.5">
+                      <span className="w-2 h-2 rounded-full bg-emerald-500" />
+                      Part 2 (Silindirik Soket Delikli)
+                    </span>
+                    {statsB && (
+                      <span className="font-mono text-[10px] text-emerald-400">
+                        {exportConfig?.format === 'ascii' ? statsB.asciiSizeFormatted : statsB.binarySizeFormatted}
+                      </span>
+                    )}
+                  </div>
+                  <div className="text-[10px] text-emerald-300 font-mono truncate" title={currentFilenames.part2}>
+                    {currentFilenames.part2}
+                  </div>
+                  <p className="text-[10px] text-gray-400 font-mono">
+                    {statsB?.triangles.toLocaleString()} üçgen • Silindirik hizalama deliği
+                  </p>
+                  <button
+                    onClick={onExportPartB}
+                    className="w-full py-1.5 px-3 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-semibold transition flex items-center justify-center gap-1.5"
+                    title={currentFilenames.part2}
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    <span className="truncate">Part 2 İndir ({currentFilenames.part2})</span>
+                  </button>
+                </div>
 
-          {/* Combined STL */}
-          <button
-            onClick={onExportCombined}
-            className="w-full py-2 px-3 bg-purple-600 hover:bg-purple-500 text-white rounded-xl text-xs font-semibold transition flex items-center justify-center gap-1.5"
-          >
-            <FileDown className="w-3.5 h-3.5" />
-            Birleştirilmiş Modifiye Mesh (Tek STL)
-          </button>
+                {/* Standalone Dowel Pin */}
+                {dowelGeom && (
+                  <div className="bg-amber-950/30 border border-amber-800/40 rounded-xl p-3 space-y-2">
+                    <div className="flex justify-between items-center text-xs">
+                      <span className="font-bold text-amber-300 flex items-center gap-1.5">
+                        <CircleDot className="w-3.5 h-3.5 text-amber-400" />
+                        Dübel Pimi STL (Ø{dowelSpecs?.diameter || 8}mm × {dowelSpecs?.length || 20}mm)
+                      </span>
+                    </div>
+                    <div className="text-[10px] text-amber-400 font-mono truncate">
+                      {currentFilenames.dowel}
+                    </div>
+                    <button
+                      onClick={onExportDowelPin}
+                      className="w-full py-1.5 px-3 bg-gradient-to-r from-amber-600 to-orange-600 hover:from-amber-500 hover:to-orange-500 text-white rounded-lg text-xs font-bold transition flex items-center justify-center gap-1.5"
+                    >
+                      <Download className="w-3.5 h-3.5" />
+                      <span>Dübel Pimi İndir</span>
+                    </button>
+                  </div>
+                )}
 
-          {/* ZIP */}
-          <button
-            onClick={onExportZip}
-            className="w-full py-2.5 px-3 bg-gradient-to-r from-cyan-600 to-emerald-600 hover:from-cyan-500 hover:to-emerald-500 text-white rounded-xl text-xs font-bold transition flex items-center justify-center gap-2 shadow-lg"
-          >
-            <FolderArchive className="w-4 h-4" />
-            Tüm Parçaları ZIP İndir [{exportConfig?.format?.toUpperCase() || 'BINARY'} • %{Math.round((exportConfig?.density || 1) * 100)}]
-          </button>
+                {/* Combined STL */}
+                <button
+                  onClick={onExportCombined}
+                  className="w-full py-2 px-3 bg-purple-600 hover:bg-purple-500 text-white rounded-xl text-xs font-semibold transition flex items-center justify-center gap-1.5"
+                  title={currentFilenames.combined}
+                >
+                  <FileDown className="w-3.5 h-3.5" />
+                  <span className="truncate">Birleştirilmiş Modifiye Mesh ({currentFilenames.combined})</span>
+                </button>
+
+                {/* ZIP */}
+                <button
+                  onClick={onExportZip}
+                  className="w-full py-2.5 px-3 bg-gradient-to-r from-cyan-600 to-emerald-600 hover:from-cyan-500 hover:to-emerald-500 text-white rounded-xl text-xs font-bold transition flex items-center justify-center gap-2 shadow-lg"
+                  title={currentFilenames.zip}
+                >
+                  <FolderArchive className="w-4 h-4" />
+                  <span className="truncate">Tüm Parçaları ZIP İndir ({currentFilenames.zip})</span>
+                </button>
+              </>
+            );
+          })()}
 
           {/* CSV Print Settings & Export History Export */}
           <button
@@ -3464,7 +3618,7 @@ export function ControlsPanel({
       {activeTab === 'batch' && (
         <BatchQueueTab
           queue={batchQueue}
-          onUpdateQueue={onUpdateBatchQueue}
+          onUpdateQueue={onUpdateBatchQueue || onUpdateQueue}
           onOpenBatchModal={onOpenBatchModal}
           isProcessing={isBatchProcessing}
           currentProcessingId={currentBatchProcessingId}
@@ -3480,6 +3634,10 @@ export function ControlsPanel({
           onAddFiles={onAddBatchFiles}
           onAddAllPresets={onAddAllBatchPresets}
           onClearQueue={onClearBatchQueue}
+          batchSettings={batchSettings}
+          onBatchSettingsChange={onBatchSettingsChange}
+          onSyncWithViewport={onSyncBatchWithViewport}
+          onApplyToViewport={onApplyBatchToViewport}
         />
       )}
 

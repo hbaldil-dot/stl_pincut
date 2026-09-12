@@ -46,17 +46,21 @@ export function BatchProcessingModal({
   activeClippingConfig,
   activePinConfig,
   onLoadItemInViewport,
-  onNotify
+  onNotify,
+  batchSettings,
+  onBatchSettingsChange,
+  onApplyToViewport
 }) {
   // Shared Batch Cut Plane & Pin Configuration State
-  const [batchClipping, setBatchClipping] = useState({
+  const [localBatchClipping, setLocalBatchClipping] = useState({
     axis: activeClippingConfig?.axis || 'y',
     offset: activeClippingConfig?.offset || 0,
+    offsetMode: 'absolute', // 'absolute' | 'percentage'
     negate: activeClippingConfig?.negate || false,
     addPinOnSlice: activeClippingConfig?.addPinOnSlice !== false
   });
 
-  const [batchPin, setBatchPin] = useState({
+  const [localBatchPin, setLocalBatchPin] = useState({
     mode: activePinConfig?.mode || 'pin_and_hole',
     diameter: activePinConfig?.diameter || 8.0,
     depth: activePinConfig?.depth || 10.0,
@@ -67,6 +71,32 @@ export function BatchProcessingModal({
     snapToCenter: activePinConfig?.snapToCenter !== false,
     flushFit: activePinConfig?.flushFit !== false
   });
+
+  const batchClipping = batchSettings?.clipping || localBatchClipping;
+  const setBatchClipping = (valOrFn) => {
+    const nextVal = typeof valOrFn === 'function' ? valOrFn(batchClipping) : valOrFn;
+    if (onBatchSettingsChange && batchSettings) {
+      onBatchSettingsChange({
+        ...batchSettings,
+        clipping: nextVal
+      });
+    } else {
+      setLocalBatchClipping(nextVal);
+    }
+  };
+
+  const batchPin = batchSettings?.pin || localBatchPin;
+  const setBatchPin = (valOrFn) => {
+    const nextVal = typeof valOrFn === 'function' ? valOrFn(batchPin) : valOrFn;
+    if (onBatchSettingsChange && batchSettings) {
+      onBatchSettingsChange({
+        ...batchSettings,
+        pin: nextVal
+      });
+    } else {
+      setLocalBatchPin(nextVal);
+    }
+  };
 
   const [isProcessing, setIsProcessing] = useState(false);
   const [isExportingAll, setIsExportingAll] = useState(false);
@@ -238,8 +268,6 @@ export function BatchProcessingModal({
     if (batchClipping.negate) {
       effNormal.negate();
     }
-    const effOffset = batchClipping.negate ? -batchClipping.offset : batchClipping.offset;
-
     // Work on a mutable clone of queue
     let currentQueue = [...queue];
 
@@ -294,6 +322,24 @@ export function BatchProcessingModal({
         };
         onUpdateQueue([...currentQueue]);
         await new Promise(resolve => setTimeout(resolve, 40));
+
+        // Compute effective offset per mesh (supporting both absolute mm and percentage of height)
+        let effOffset = 0;
+        if (batchClipping.offsetMode === 'percentage') {
+          mesh.geometry.computeBoundingBox();
+          const bbox = mesh.geometry.boundingBox;
+          const ax = batchClipping.axis || 'y';
+          const minVal = bbox ? bbox.min[ax] : -25;
+          const maxVal = bbox ? bbox.max[ax] : 25;
+          const span = maxVal - minVal;
+          const pct = typeof batchClipping.offset === 'number' ? batchClipping.offset : 50;
+          effOffset = minVal + (pct / 100) * span;
+        } else {
+          effOffset = batchClipping.offset || 0;
+        }
+        if (batchClipping.negate) {
+          effOffset = -effOffset;
+        }
 
         const result = sliceMeshWithPlane(
           mesh,
@@ -817,13 +863,28 @@ export function BatchProcessingModal({
                   Bu ayarlar kuyruktaki <strong>tüm STL modellerine</strong> sırasıyla uygulanacaktır.
                 </span>
               </div>
-              <button
-                onClick={handleSyncWithViewport}
-                className="py-1 px-2.5 bg-gray-800 hover:bg-gray-700 text-cyan-300 rounded-lg border border-gray-700 text-xs font-semibold transition flex items-center gap-1"
-              >
-                <RefreshCw className="w-3 h-3" />
-                <span>3D Sahnenden Çek</span>
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleSyncWithViewport}
+                  className="py-1 px-2.5 bg-gray-800 hover:bg-gray-700 text-cyan-300 rounded-lg border border-gray-700 text-xs font-semibold transition flex items-center gap-1"
+                  title="3D sahnedeki kesim ve pim ayarlarını bu ortak ayarlara aktar"
+                >
+                  <RefreshCw className="w-3 h-3" />
+                  <span>3D Sahnenden Çek</span>
+                </button>
+                {onApplyToViewport && (
+                  <button
+                    type="button"
+                    onClick={onApplyToViewport}
+                    className="py-1 px-2.5 bg-gray-800 hover:bg-gray-700 text-emerald-300 rounded-lg border border-gray-700 text-xs font-semibold transition flex items-center gap-1"
+                    title="Bu ortak ayarları 3D sahneye ve aktif modele uygula"
+                  >
+                    <Eye className="w-3 h-3 text-emerald-400" />
+                    <span>3D Sahneye Uygula</span>
+                  </button>
+                )}
+              </div>
             </div>
 
             {/* 1. Shared Cut Plane Settings */}
@@ -834,7 +895,7 @@ export function BatchProcessingModal({
                   <span>Ortak Kesme Düzlemi (Cut Plane)</span>
                 </span>
                 <span className="text-[10px] font-mono text-emerald-300 bg-emerald-950/70 border border-emerald-800/60 px-2 py-0.5 rounded-full">
-                  {batchClipping.axis.toUpperCase()}-Ekseni | Ofset: {batchClipping.offset}mm
+                  {batchClipping.axis.toUpperCase()}-Ekseni | {batchClipping.offsetMode === 'percentage' ? `%${batchClipping.offset || 50} Yükseklik` : `Ofset: ${batchClipping.offset || 0}mm`}
                 </span>
               </div>
 
@@ -858,21 +919,77 @@ export function BatchProcessingModal({
                 </div>
               </div>
 
-              {/* Plane Offset Slider */}
+              {/* Plane Offset / Height Mode */}
               <div className="space-y-1.5">
                 <div className="flex items-center justify-between text-xs">
-                  <span className="text-gray-400">Düzlem Yüksekliği / Ofset:</span>
-                  <span className="font-mono text-emerald-400 font-bold">{batchClipping.offset} mm</span>
+                  <span className="text-gray-400">Düzlem Konumu / Modu:</span>
+                  <div className="flex items-center gap-1 bg-gray-900 p-0.5 rounded-lg border border-gray-800">
+                    <button
+                      type="button"
+                      onClick={() => setBatchClipping({ ...batchClipping, offsetMode: 'absolute' })}
+                      className={`px-2 py-0.5 text-[10px] font-bold rounded ${
+                        batchClipping.offsetMode !== 'percentage'
+                          ? 'bg-emerald-600 text-white'
+                          : 'text-gray-400 hover:text-gray-200'
+                      }`}
+                    >
+                      Ofset (mm)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setBatchClipping({ ...batchClipping, offsetMode: 'percentage', offset: 50 })}
+                      className={`px-2 py-0.5 text-[10px] font-bold rounded ${
+                        batchClipping.offsetMode === 'percentage'
+                          ? 'bg-emerald-600 text-white'
+                          : 'text-gray-400 hover:text-gray-200'
+                      }`}
+                    >
+                      Yükseklik Oranı (%)
+                    </button>
+                  </div>
                 </div>
-                <input
-                  type="range"
-                  min="-40"
-                  max="40"
-                  step="0.5"
-                  value={batchClipping.offset}
-                  onChange={(e) => setBatchClipping({ ...batchClipping, offset: parseFloat(e.target.value) })}
-                  className="w-full accent-emerald-500 cursor-pointer h-1.5 bg-gray-800 rounded-lg appearance-none"
-                />
+
+                {batchClipping.offsetMode === 'percentage' ? (
+                  <div className="space-y-1">
+                    <div className="flex items-center justify-between text-xs font-mono">
+                      <span className="text-gray-400">Model Yükseklik Yüzdesi:</span>
+                      <span className="text-emerald-400 font-bold font-mono">
+                        %{typeof batchClipping.offset === 'number' ? batchClipping.offset : 50}
+                        {(batchClipping.offset === 50 || batchClipping.offset === undefined) && ' (Merkez Midpoint)'}
+                      </span>
+                    </div>
+                    <input
+                      type="range"
+                      min="10"
+                      max="90"
+                      step="5"
+                      value={typeof batchClipping.offset === 'number' ? batchClipping.offset : 50}
+                      onChange={(e) => setBatchClipping({ ...batchClipping, offset: parseFloat(e.target.value) })}
+                      className="w-full accent-emerald-500 cursor-pointer h-1.5 bg-gray-800 rounded-lg appearance-none"
+                    />
+                    <div className="flex justify-between text-[10px] text-gray-500 font-mono">
+                      <span>%10 Alt Taban</span>
+                      <span className="text-emerald-400 font-bold">%50 Orta Merkez</span>
+                      <span>%90 Üst Tavan</span>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="space-y-1">
+                    <div className="flex items-center justify-between text-xs">
+                      <span className="text-gray-400">Merkezden Sapma (Ofset):</span>
+                      <span className="font-mono text-emerald-400 font-bold">{batchClipping.offset || 0} mm</span>
+                    </div>
+                    <input
+                      type="range"
+                      min="-40"
+                      max="40"
+                      step="0.5"
+                      value={batchClipping.offset || 0}
+                      onChange={(e) => setBatchClipping({ ...batchClipping, offset: parseFloat(e.target.value) })}
+                      className="w-full accent-emerald-500 cursor-pointer h-1.5 bg-gray-800 rounded-lg appearance-none"
+                    />
+                  </div>
+                )}
               </div>
 
               {/* Toggles */}
@@ -941,6 +1058,34 @@ export function BatchProcessingModal({
                   </div>
                 </div>
 
+                {/* Pin Type */}
+                {batchPin.mode !== 'flat' && (
+                  <div className="space-y-1.5">
+                    <label className="text-[11px] text-gray-400">Pim Geometrisi / Kesiti:</label>
+                    <div className="grid grid-cols-4 gap-2">
+                      {[
+                        { id: 'cylinder', label: 'Silindir' },
+                        { id: 'square', label: 'Kare' },
+                        { id: 'hex', label: 'Altıgen' },
+                        { id: 'cone', label: 'Konik' }
+                      ].map((t) => (
+                        <button
+                          key={t.id}
+                          type="button"
+                          onClick={() => setBatchPin({ ...batchPin, type: t.id })}
+                          className={`py-1.5 rounded-lg text-xs font-semibold border transition text-center ${
+                            (batchPin.type || 'cylinder') === t.id
+                              ? 'bg-cyan-950/80 text-cyan-300 border-cyan-500 font-bold'
+                              : 'bg-gray-850 text-gray-400 border-gray-800 hover:bg-gray-800'
+                          }`}
+                        >
+                          {t.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
                 {/* Dimension Presets */}
                 {batchPin.mode !== 'flat' && (
                   <>
@@ -997,11 +1142,24 @@ export function BatchProcessingModal({
                       <div className="p-2 bg-gray-900 rounded-xl border border-gray-800 flex items-center justify-between">
                         <div className="text-[11px]">
                           <div className="font-bold text-gray-200">Fit Boşluğu (Tolerans)</div>
-                          <div className="text-[9px] text-gray-400">FDM 3D baskı için</div>
+                          <div className="text-[9px] text-gray-400">FDM 3D baskı payı</div>
                         </div>
-                        <span className="text-xs font-mono font-bold text-cyan-400">
-                          +{batchPin.clearance} mm
-                        </span>
+                        <div className="flex items-center gap-1">
+                          {[0.15, 0.20, 0.30].map((c) => (
+                            <button
+                              key={c}
+                              type="button"
+                              onClick={() => setBatchPin({ ...batchPin, clearance: c })}
+                              className={`px-1.5 py-0.5 rounded font-mono text-[10px] border transition ${
+                                (batchPin.clearance ?? 0.2) === c
+                                  ? 'bg-cyan-600 text-white border-cyan-400 font-bold'
+                                  : 'bg-gray-800 text-gray-400 border-gray-700'
+                              }`}
+                            >
+                              +{c}
+                            </button>
+                          ))}
+                        </div>
                       </div>
 
                       <div className="p-2 bg-gray-900 rounded-xl border border-gray-800 flex items-center justify-between">

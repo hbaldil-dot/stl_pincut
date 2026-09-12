@@ -33,6 +33,7 @@ import {
   downloadConfigComparisonJSON
 } from '../utils/configHistoryStorage.js';
 import WireframeThumbnail from './WireframeThumbnail.jsx';
+import { useUnit } from '../context/UnitContext.jsx';
 
 /**
  * Returns a distinctive color code for a given material name
@@ -68,6 +69,7 @@ export default function ConfigurationHistoryLog({
   compact = false,
   title = 'Baskı Ayarları & Dışa Aktarma Geçmişi'
 }) {
+  const { formatDimensions } = useUnit();
   const [history, setHistory] = useState([]);
   const [isSavedFeedback, setIsSavedFeedback] = useState(false);
   const [isExpanded, setIsExpanded] = useState(true);
@@ -354,7 +356,7 @@ export default function ConfigurationHistoryLog({
                   <span className="font-semibold text-gray-200 truncate">Aktif Model Referansı</span>
                 </div>
                 <div className="text-[9px] text-gray-400 font-mono truncate">
-                  {Math.round(activeConfig.dimensions?.x || 0)}×{Math.round(activeConfig.dimensions?.y || 0)}×{Math.round(activeConfig.dimensions?.z || 0)} mm
+                  {formatDimensions(activeConfig.dimensions)}
                 </div>
               </div>
             </div>
@@ -651,7 +653,7 @@ export default function ConfigurationHistoryLog({
                     <div className="flex items-center justify-between pt-1.5 border-t border-gray-800/80 text-[10px]">
                       <span className="text-[9px] text-gray-400 font-mono truncate mr-2 flex items-center gap-1">
                         <Box className="w-3 h-3 text-cyan-400 inline shrink-0" />
-                        <span>Boyut: {Math.round(entry.dimensions?.x || 0)}×{Math.round(entry.dimensions?.y || 0)}×{Math.round(entry.dimensions?.z || 0)} mm</span>
+                        <span>Boyut: {formatDimensions(entry.dimensions)}</span>
                       </span>
 
                       <div className="flex items-center gap-1.5 shrink-0">
@@ -780,7 +782,7 @@ export default function ConfigurationHistoryLog({
               <div className="bg-gray-900/70 p-2.5 rounded-lg border border-gray-800">
                 <span className="text-[9px] text-gray-500 block uppercase font-sans">Model Boyutları:</span>
                 <span className="font-bold text-gray-200">
-                  {Math.round(previewEntry.dimensions?.x || 0)}×{Math.round(previewEntry.dimensions?.y || 0)}×{Math.round(previewEntry.dimensions?.z || 0)} mm
+                  {formatDimensions(previewEntry.dimensions)}
                 </span>
               </div>
               <div className="bg-gray-900/70 p-2.5 rounded-lg border border-gray-800">
