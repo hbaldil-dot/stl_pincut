@@ -23,9 +23,11 @@ import {
   X,
   Upload,
   Check,
-  Info
+  Info,
+  Bookmark
 } from 'lucide-react';
 import { formatBytes } from '../utils/stlExporter';
+import { loadAllCuttingPresets } from '../utils/cuttingPresetsStorage';
 
 export function BatchQueueTab({
   queue = [],
@@ -45,6 +47,11 @@ export function BatchQueueTab({
   onAddFiles,
   onAddAllPresets,
   onClearQueue,
+  onAddCurrentModel,
+  hasActiveModel = false,
+  currentModelName = null,
+  activeClippingConfig = null,
+  activePinConfig = null,
   // Uniform settings props
   batchSettings,
   onBatchSettingsChange,
@@ -191,6 +198,17 @@ export function BatchQueueTab({
         />
 
         <div className="grid grid-cols-2 gap-2">
+          {hasActiveModel && onAddCurrentModel && (
+            <button
+              onClick={onAddCurrentModel}
+              className="col-span-2 py-2 px-2.5 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-bold transition flex items-center justify-center gap-1.5 shadow-md shadow-blue-950/50"
+              title="Aktif 3D sahnede yüklü olan modeli kuyruğa ekle"
+            >
+              <Box className="w-3.5 h-3.5" />
+              <span>Aktif Modeli Kuyruğa Ekle ({currentModelName || 'Model'})</span>
+            </button>
+          )}
+
           <button
             onClick={() => fileInputRef.current?.click()}
             className="py-2 px-2.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold transition flex items-center justify-center gap-1.5 shadow-md shadow-emerald-950/50"
@@ -260,6 +278,54 @@ export function BatchQueueTab({
         {/* Accordion Body */}
         {isSettingsOpen && (
           <div className="p-3 space-y-3 border-t border-gray-800 text-xs">
+            {/* Quick Preset Selector */}
+            <div className="bg-amber-950/20 border border-amber-500/30 rounded-lg p-2 flex items-center justify-between gap-2">
+              <div className="flex items-center gap-1.5 min-w-0">
+                <Bookmark className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                <span className="text-[11px] font-semibold text-amber-300 truncate">Hazır Şablon:</span>
+              </div>
+              <select
+                onChange={(e) => {
+                  const presets = loadAllCuttingPresets();
+                  const found = presets.find((p) => p.id === e.target.value);
+                  if (found) {
+                    updateSettings({
+                      ...settings,
+                      clipping: {
+                        ...settings.clipping,
+                        axis: found.clippingConfig?.axis || settings.clipping?.axis || 'y',
+                        offset: typeof found.clippingConfig?.offset === 'number' ? found.clippingConfig.offset : 0,
+                        offsetMode: found.clippingConfig?.offsetMode || settings.clipping?.offsetMode || 'absolute',
+                        negate: found.clippingConfig?.negate || false,
+                        addPinOnSlice: found.clippingConfig?.addPinOnSlice !== false
+                      },
+                      pin: {
+                        ...settings.pin,
+                        mode: found.pinConfig?.mode || settings.pin?.mode || 'pin_and_hole',
+                        diameter: found.pinConfig?.diameter || 8.0,
+                        depth: found.pinConfig?.depth || 10.0,
+                        clearance: typeof found.pinConfig?.clearance === 'number' ? found.pinConfig.clearance : 0.2,
+                        type: found.pinConfig?.type || 'cylinder',
+                        taper: typeof found.pinConfig?.taper === 'number' ? found.pinConfig.taper : 0.85,
+                        snapToNormal: found.pinConfig?.snapToNormal !== false,
+                        snapToCenter: found.pinConfig?.snapToCenter !== false,
+                        flushFit: found.pinConfig?.flushFit !== false
+                      }
+                    });
+                  }
+                }}
+                defaultValue=""
+                className="bg-gray-900 border border-amber-500/40 text-amber-300 text-[11px] font-semibold rounded px-2 py-1 focus:outline-none max-w-[160px] truncate"
+              >
+                <option value="" disabled>Şablon Seç...</option>
+                {loadAllCuttingPresets().map((p) => (
+                  <option key={p.id} value={p.id} className="bg-gray-900 text-gray-200">
+                    {p.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+
             {/* Viewport Sync & Apply Buttons */}
             <div className="grid grid-cols-2 gap-1.5">
               <button
@@ -561,18 +627,33 @@ export function BatchQueueTab({
             <span>Toplu İşlemeyi Durdur</span>
           </button>
         ) : (
-          <button
-            onClick={onStartProcessing}
-            disabled={totalCount === 0 || pendingCount === 0}
-            className={`w-full py-2.5 px-4 rounded-xl text-xs font-bold transition flex items-center justify-center gap-2 shadow-lg ${
-              totalCount > 0 && pendingCount > 0
-                ? 'bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white shadow-emerald-950/50 hover:scale-[1.01]'
-                : 'bg-gray-800 text-gray-500 cursor-not-allowed border border-gray-700'
-            }`}
-          >
-            <Play className="w-4 h-4 fill-current" />
-            <span>Tümünü Sırayla İşle ({pendingCount} Bekliyor)</span>
-          </button>
+          <div className="flex flex-col gap-2">
+            {/* Primary ONE-GO PROCESS & EXPORT BUTTON */}
+            <button
+              onClick={() => onStartProcessing?.({ autoExportZip: true, useCurrentViewport: true })}
+              disabled={totalCount === 0 || pendingCount === 0}
+              className={`w-full py-2.5 px-4 rounded-xl text-xs font-extrabold transition flex items-center justify-center gap-2 shadow-xl ${
+                totalCount > 0 && pendingCount > 0
+                  ? 'bg-gradient-to-r from-emerald-500 via-teal-500 to-cyan-500 hover:from-emerald-400 hover:via-teal-400 hover:to-cyan-400 text-gray-950 shadow-emerald-950/60 hover:scale-[1.01] ring-1 ring-emerald-300/40'
+                  : 'bg-gray-800 text-gray-500 cursor-not-allowed border border-gray-700'
+              }`}
+              title="Kuyruktaki tüm modelleri aktif kesim ve pim ayarlarıyla keser ve bitince tek ZIP olarak otomatik indirir"
+            >
+              <FolderArchive className="w-4 h-4" />
+              <span>Hepsini Kes ve Tek Seferde İndir ({pendingCount > 0 ? `${pendingCount} Bekliyor` : 'Hazır'})</span>
+            </button>
+
+            {/* Secondary Sadece Kes Button */}
+            <button
+              onClick={() => onStartProcessing?.({ autoExportZip: false, useCurrentViewport: true })}
+              disabled={totalCount === 0 || pendingCount === 0}
+              className="w-full py-2 px-3 bg-gray-800 hover:bg-gray-700 text-gray-300 rounded-xl text-xs font-semibold transition flex items-center justify-center gap-1.5 border border-gray-700 hover:border-gray-600"
+              title="Modelleri kesit düzlemi ve pim yuvalarıyla dilimler, sonuçları kuyrukta incelemek için hazır tutar"
+            >
+              <Play className="w-3.5 h-3.5 text-emerald-400 fill-current" />
+              <span>Sadece Kes (Kuyrukta Tut)</span>
+            </button>
+          </div>
         )}
 
         {completedCount > 0 && (

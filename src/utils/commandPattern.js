@@ -239,6 +239,91 @@ export class ModelScaleCommand extends BaseCommand {
 }
 
 /**
+ * Command representing a 3D Model Positioning/Translation transformation.
+ * Supports XYZ coordinate movement, build plate alignment, and centering.
+ */
+export class ModelPositionCommand extends BaseCommand {
+  constructor({
+    previousPosition,
+    newPosition,
+    description = null,
+    subType = 'position_general',
+    isContinuous = false
+  }) {
+    const px = parseFloat((newPosition?.x ?? 0).toFixed(2));
+    const py = parseFloat((newPosition?.y ?? 0).toFixed(2));
+    const pz = parseFloat((newPosition?.z ?? 0).toFixed(2));
+
+    const desc =
+      description ||
+      (subType === 'position_bed'
+        ? 'Model Tablaya Oturtuldu'
+        : subType === 'position_center'
+        ? 'Model Merkeze Hizalandı (0, 0, 0)'
+        : subType === 'position_reset'
+        ? 'Model Konumu Sıfırlandı'
+        : `Model Konumlandırıldı (X:${px} Y:${py} Z:${pz})`);
+
+    super({
+      name: 'Model Konumu',
+      description: desc,
+      type: 'MODEL_POSITION',
+      subType,
+      isContinuous
+    });
+
+    this.previousPosition = {
+      x: previousPosition?.x ?? 0,
+      y: previousPosition?.y ?? 0,
+      z: previousPosition?.z ?? 0
+    };
+    this.newPosition = {
+      x: px,
+      y: py,
+      z: pz
+    };
+  }
+
+  execute(context) {
+    if (context.setModelPosition) {
+      context.setModelPosition(this.newPosition);
+    }
+  }
+
+  undo(context) {
+    if (context.setModelPosition) {
+      context.setModelPosition(this.previousPosition);
+    }
+  }
+
+  canMergeWith(other) {
+    if (!(other instanceof ModelPositionCommand)) return false;
+    if (this.subType !== other.subType) return false;
+    const isSlider =
+      this.isContinuous ||
+      other.isContinuous ||
+      ['position_drag', 'position_gizmo'].includes(this.subType);
+    return isSlider && other.timestamp - this.timestamp < 1000;
+  }
+
+  merge(other) {
+    this.newPosition = { ...other.newPosition };
+    this.description = other.description;
+    this.timestamp = other.timestamp;
+  }
+
+  getDiffSummary() {
+    const nx = Math.round(this.newPosition.x);
+    const ny = Math.round(this.newPosition.y);
+    const nz = Math.round(this.newPosition.z);
+    const px = Math.round(this.previousPosition.x);
+    const py = Math.round(this.previousPosition.y);
+    const pz = Math.round(this.previousPosition.z);
+    return `[X:${px} Y:${py} Z:${pz}] → [X:${nx} Y:${ny} Z:${nz}]`;
+  }
+}
+
+/**
  * Helper to deep clone a clipping plane configuration
  */
 function cloneClippingConfig(cfg) {
@@ -497,6 +582,58 @@ export class PinPlacementCommand extends BaseCommand {
       return `+${prevC.toFixed(2)} mm → +${newC.toFixed(2)} mm`;
     }
     return null;
+  }
+}
+
+/**
+ * CuttingPresetCommand - Tracks applying complete cutting & pin alignment presets across models.
+ */
+export class CuttingPresetCommand extends BaseCommand {
+  constructor({
+    previousClippingConfig,
+    newClippingConfig,
+    previousPinConfig,
+    newPinConfig,
+    presetName = 'Şablon',
+    description = null
+  }) {
+    super({
+      name: 'Kesim & Pim Şablonu',
+      description: description || `"${presetName}" Şablonu Uygulandı`,
+      type: 'PRESET_APPLY',
+      subType: 'cutting_preset'
+    });
+
+    this.previousClippingConfig = cloneClippingConfig(previousClippingConfig);
+    this.newClippingConfig = cloneClippingConfig(newClippingConfig);
+    this.previousPinConfig = clonePinConfig(previousPinConfig);
+    this.newPinConfig = clonePinConfig(newPinConfig);
+    this.presetName = presetName;
+  }
+
+  execute(context) {
+    if (context.setClippingConfig) {
+      context.setClippingConfig(this.newClippingConfig);
+    }
+    if (context.setPinConfig) {
+      context.setPinConfig(this.newPinConfig);
+    }
+  }
+
+  undo(context) {
+    if (context.setClippingConfig) {
+      context.setClippingConfig(this.previousClippingConfig);
+    }
+    if (context.setPinConfig) {
+      context.setPinConfig(this.previousPinConfig);
+    }
+  }
+
+  getDiffSummary() {
+    const diam = this.newPinConfig.diameter ?? this.newPinConfig.size ?? 8;
+    const dpth = this.newPinConfig.depth ?? this.newPinConfig.height ?? 10;
+    const clr = this.newPinConfig.clearance ?? 0.2;
+    return `${this.presetName} (Ø${diam}x${dpth}mm, +${clr.toFixed(2)}mm)`;
   }
 }
 

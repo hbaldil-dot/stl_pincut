@@ -1,6 +1,6 @@
 {
   "name": "STL PinCut 3D",
-  "description": "3D STL model viewer, cut plane positioning with 3D ruler measurement in mm, alignment pin generator with surface-normal snapping, overhang support heatmap, surface area & solid volume analysis with material density input (g/cm³) and automated mass calculation, multi-unit conversion, and configurable STL export",
+  "description": "3D STL model viewer, cut plane positioning with 3D ruler measurement in mm, alignment pin generator with surface-normal snapping, cutting & pin alignment presets, overhang support heatmap, surface area & solid volume analysis with material density input (g/cm³) and automated mass calculation, multi-unit conversion, and configurable STL export",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

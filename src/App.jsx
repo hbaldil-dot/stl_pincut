@@ -9,6 +9,7 @@ import { MeshListPanel } from './components/MeshListPanel';
 import { BatchProcessingModal } from './components/BatchProcessingModal';
 import { VolumeMaterialModal } from './components/VolumeMaterialModal';
 import { OrientationAssistantModal } from './components/OrientationAssistantModal';
+import { CuttingPresetsModal } from './components/CuttingPresetsModal';
 import { loadSamplePreset, parseCustomSTL, MATERIAL_THEMES } from './utils/stlLoaderHelper';
 import { SAMPLE_PRESETS } from './utils/sampleModels';
 import { sliceMeshWithPlane, sliceMeshWithLasso } from './utils/meshSlicer';
@@ -17,12 +18,15 @@ import {
   CommandStack,
   ModelTransformCommand,
   ModelScaleCommand,
+  ModelPositionCommand,
   CutPlaneAdjustCommand,
   PinPlacementCommand,
   SplitModelCommand,
   MeasureCommand,
-  InitialModelCommand
+  InitialModelCommand,
+  CuttingPresetCommand
 } from './utils/commandPattern';
+import { resolvePresetConfigs } from './utils/cuttingPresetsStorage';
 import {
   downloadMeshSTL,
   downloadCombinedSTL,
@@ -57,7 +61,8 @@ import {
   Undo2,
   Redo2,
   History,
-  Flame
+  Flame,
+  Bookmark
 } from 'lucide-react';
 import { recordMountCheckpoint } from './components/ConsoleDiagnosticSummary.jsx';
 
@@ -147,6 +152,13 @@ export function App() {
   const [modelScale, setModelScale] = useState({ x: 1, y: 1, z: 1 });
   const [isUniformScale, setIsUniformScale] = useState(true);
 
+  // Model 3D Position & Placement State (XYZ Coordinates & Bed Alignment)
+  const [modelPosition, setModelPosition] = useState({ x: 0, y: 0, z: 0 });
+  const [transformGizmoMode, setTransformGizmoMode] = useState('rotate'); // 'rotate' | 'translate'
+  const [isTranslateGizmoActive, setIsTranslateGizmoActive] = useState(false);
+  const [showFootprint, setShowFootprint] = useState(true);
+  const [showDimensionLabels, setShowDimensionLabels] = useState(true);
+
   // Sliced Meshes & Exploded View
   const [splitResult, setSplitResult] = useState(null);
   const [explodedDistance, setExplodedDistance] = useState(15);
@@ -217,6 +229,18 @@ export function App() {
   const modelScaleRef = useRef(modelScale);
   modelScaleRef.current = modelScale;
 
+  const modelPositionRef = useRef(modelPosition);
+  modelPositionRef.current = modelPosition;
+
+  const isDraggingPositionRef = useRef(false);
+  const positionBeforeDragRef = useRef(modelPosition);
+
+  const modelPositionRef = useRef(modelPosition);
+  modelPositionRef.current = modelPosition;
+
+  const isDraggingPositionRef = useRef(false);
+  const positionBeforeDragRef = useRef(modelPosition);
+
   const clippingConfigRef = useRef(clippingConfig);
   clippingConfigRef.current = clippingConfig;
 
@@ -245,6 +269,7 @@ export function App() {
   const commandContext = useMemo(() => ({
     setModelRotation: (rot) => setModelRotation(rot),
     setModelScale: (scale) => setModelScale(scale),
+    setModelPosition: (pos) => setModelPosition(pos),
     setClippingConfig: (cfg) => setClippingConfig(cfg),
     setPinConfig: (pin) => setPinConfig(pin),
     setSplitResult: (res) => {
@@ -281,6 +306,36 @@ export function App() {
 
   // Orientation Assistant State
   const [isOrientationModalOpen, setIsOrientationModalOpen] = useState(false);
+
+  // Cutting & Pin Alignment Presets Modal State
+  const [isCuttingPresetsModalOpen, setIsCuttingPresetsModalOpen] = useState(false);
+
+  const handleApplyCuttingPreset = (preset) => {
+    if (!preset) return;
+    const { nextClippingConfig, nextPinConfig } = resolvePresetConfigs(
+      preset,
+      clippingConfigRef.current,
+      pinConfigRef.current
+    );
+
+    const cmd = new CuttingPresetCommand({
+      previousClippingConfig: clippingConfigRef.current,
+      newClippingConfig: nextClippingConfig,
+      previousPinConfig: pinConfigRef.current,
+      newPinConfig: nextPinConfig,
+      presetName: preset.name,
+      description: `"${preset.name}" Şablonu Uygulandı`
+    });
+
+    executeCommand(cmd);
+
+    const diam = nextPinConfig.diameter ?? nextPinConfig.size ?? 8;
+    const dpth = nextPinConfig.depth ?? nextPinConfig.height ?? 10;
+    const clr = nextPinConfig.clearance ?? 0.2;
+    setStatusMessage(
+      `"${preset.name}" şablonu uygulandı: Ø${diam}×${dpth}mm (+${Number(clr).toFixed(2)}mm tolerans), ${String(nextClippingConfig.axis || 'y').toUpperCase()} ekseni.`
+    );
+  };
 
   // Batch Processing Queue State
   const [isBatchModalOpen, setIsBatchModalOpen] = useState(false);
@@ -1145,6 +1200,32 @@ export function App() {
     setStatusMessage('Tüm 4 örnek model toplu işleme kuyruğuna eklendi.');
   };
 
+  const handleAddCurrentModelToQueue = () => {
+    if (!model || !model.geometry) {
+      setStatusMessage('Kuyruğa eklenecek aktif model bulunmuyor.');
+      return;
+    }
+    const cleanName = (modelName || 'Model').replace(/\.stl$/i, '');
+    const posCount = model.geometry.attributes?.position?.count || 5000;
+    const newItem = {
+      id: `current_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
+      name: `${cleanName}.stl`,
+      size: modelInfo?.fileSize || (posCount * 50),
+      file: null,
+      mesh: model.clone(),
+      info: modelInfo,
+      isCurrentModel: true,
+      isPreset: false,
+      status: 'pending',
+      progress: 0,
+      statusText: 'Bekliyor',
+      result: null,
+      error: null
+    };
+    setBatchQueue(prev => [...prev, newItem]);
+    setStatusMessage(`"${cleanName}.stl" toplu işleme kuyruğuna eklendi.`);
+  };
+
   const handleClearBatchQueue = () => {
     if (isBatchProcessing) return;
     setBatchQueue([]);
@@ -1233,21 +1314,44 @@ export function App() {
     setStatusMessage('Toplu kesim ve pim ayarları aktif 3D sahneye uygulandı.');
   };
 
-  const handleStartBatchProcessing = async () => {
+  const handleStartBatchProcessing = async ({ autoExportZip = false, useCurrentViewport = true } = {}) => {
     if (batchQueue.length === 0 || isBatchProcessing) return;
     setIsBatchProcessing(true);
     cancelBatchRef.current = false;
 
-    const { clipping, pin } = batchSettings;
+    // Use either current active viewport settings or configured batchSettings
+    const clippingSource = useCurrentViewport ? clippingConfig : batchSettings.clipping;
+    const pinSource = useCurrentViewport ? pinConfig : batchSettings.pin;
 
-    const effNormal = new THREE.Vector3(
-      clipping.axis === 'x' ? 1 : 0,
-      clipping.axis === 'y' ? 1 : 0,
-      clipping.axis === 'z' ? 1 : 0
-    );
-    if (clipping.negate) {
+    let effNormal = new THREE.Vector3(0, 1, 0);
+    if (clippingSource.normal) {
+      effNormal = clippingSource.normal.clone().normalize();
+    } else {
+      const ax = clippingSource.axis || 'y';
+      effNormal.set(
+        ax === 'x' ? 1 : 0,
+        ax === 'y' ? 1 : 0,
+        ax === 'z' ? 1 : 0
+      );
+    }
+    if (clippingSource.negate) {
       effNormal.negate();
     }
+
+    const pinConfigToApply = {
+      mode: pinSource.mode || 'pin_and_hole',
+      diameter: pinSource.diameter || pinSource.size || 8.0,
+      depth: pinSource.depth || pinSource.height || 10.0,
+      clearance: typeof pinSource.clearance === 'number' ? pinSource.clearance : 0.2,
+      type: pinSource.type || 'cylinder',
+      taper: pinSource.taper || 0.85,
+      snapToNormal: pinSource.snapToNormal !== false,
+      snapToCenter: pinSource.snapToCenter !== false,
+      flushFit: pinSource.flushFit !== false
+    };
+
+    const addPinOnSlice = clippingSource.addPinOnSlice !== false;
+    const offsetMode = batchSettings.clipping?.offsetMode || 'percentage';
 
     let currentQueue = [...batchQueue];
 
@@ -1271,7 +1375,10 @@ export function App() {
 
       try {
         let mesh, info;
-        if (item.isPreset) {
+        if (item.isCurrentModel && item.mesh) {
+          mesh = item.mesh.clone();
+          info = item.info;
+        } else if (item.isPreset) {
           const loaded = loadSamplePreset(item.presetId);
           mesh = loaded.mesh;
           info = loaded.info;
@@ -1287,26 +1394,26 @@ export function App() {
         currentQueue[i] = {
           ...currentQueue[i],
           progress: 60,
-          statusText: 'Düzlem boyunca kesiliyor ve pim yuvaları açılıyor...'
+          statusText: 'Kesim düzlemi uygulanıyor ve pim yuvaları açılıyor...'
         };
         setBatchQueue([...currentQueue]);
         await new Promise(r => setTimeout(r, 40));
 
         // Effective offset per mesh supporting percentage and absolute modes
         let effOffset = 0;
-        if (clipping.offsetMode === 'percentage') {
+        if (offsetMode === 'percentage') {
           mesh.geometry.computeBoundingBox();
           const bbox = mesh.geometry.boundingBox;
-          const ax = clipping.axis || 'y';
+          const ax = clippingSource.axis || 'y';
           const minVal = bbox ? bbox.min[ax] : -25;
           const maxVal = bbox ? bbox.max[ax] : 25;
           const span = maxVal - minVal;
-          const pct = typeof clipping.offset === 'number' ? clipping.offset : 50;
+          const pct = typeof batchSettings.clipping?.offset === 'number' ? batchSettings.clipping.offset : 50;
           effOffset = minVal + (pct / 100) * span;
         } else {
-          effOffset = clipping.offset || 0;
+          effOffset = clippingSource.offset || 0;
         }
-        if (clipping.negate) {
+        if (clippingSource.negate) {
           effOffset = -effOffset;
         }
 
@@ -1314,8 +1421,8 @@ export function App() {
           mesh,
           effNormal,
           effOffset,
-          pin,
-          clipping.addPinOnSlice
+          pinConfigToApply,
+          addPinOnSlice
         );
 
         currentQueue[i] = {
@@ -1348,8 +1455,31 @@ export function App() {
 
     setCurrentBatchProcessingId(null);
     setIsBatchProcessing(false);
+
     if (!cancelBatchRef.current) {
-      setStatusMessage('Toplu kesim işlemi tamamlandı.');
+      const completedItems = currentQueue.filter(it => it.status === 'completed' && it.result);
+      if (autoExportZip && completedItems.length > 0) {
+        setStatusMessage(`${completedItems.length} model işlendi. ZIP paketi tek seferde indiriliyor...`);
+        try {
+          setIsExportingBatchAll(true);
+          await downloadBatchProcessedZip(
+            completedItems,
+            {
+              clippingConfig: { ...clippingSource, offsetMode, offset: batchSettings.clipping?.offset },
+              pinConfig: pinConfigToApply
+            },
+            exportConfig
+          );
+          setStatusMessage(`${completedItems.length} model kesildi ve tek ZIP olarak başarıyla indirildi!`);
+        } catch (zipErr) {
+          console.error(zipErr);
+          setStatusMessage('Toplu ZIP indirme sırasında hata oluştu.');
+        } finally {
+          setIsExportingBatchAll(false);
+        }
+      } else {
+        setStatusMessage(`Toplu kesim işlemi tamamlandı (${completedItems.length} model hazır).`);
+      }
     }
   };
 
@@ -1976,6 +2106,137 @@ export function App() {
   };
 
   /**
+   * Model Position & Build Plate Placement Handlers (with real-time updates and Undo/Redo)
+   */
+  const handleModelPositionChange = (newPosition, pushToHist = false, isContinuous = false) => {
+    const nextPos = {
+      x: Math.round((parseFloat(newPosition?.x) || 0) * 100) / 100,
+      y: Math.round((parseFloat(newPosition?.y) || 0) * 100) / 100,
+      z: Math.round((parseFloat(newPosition?.z) || 0) * 100) / 100
+    };
+
+    if (!isDraggingPositionRef.current) {
+      isDraggingPositionRef.current = true;
+      positionBeforeDragRef.current = modelPositionRef.current;
+    }
+
+    if (pushToHist) {
+      isDraggingPositionRef.current = false;
+      const cmd = new ModelPositionCommand({
+        previousPosition: positionBeforeDragRef.current,
+        newPosition: nextPos,
+        subType: 'position_drag',
+        isContinuous
+      });
+      executeCommand(cmd);
+      positionBeforeDragRef.current = nextPos;
+    } else {
+      setModelPosition(nextPos);
+    }
+  };
+
+  const handlePositionDragEnd = () => {
+    if (isDraggingPositionRef.current) {
+      isDraggingPositionRef.current = false;
+      const prev = positionBeforeDragRef.current;
+      const curr = modelPositionRef.current;
+      if (
+        Math.abs(prev.x - curr.x) > 1e-3 ||
+        Math.abs(prev.y - curr.y) > 1e-3 ||
+        Math.abs(prev.z - curr.z) > 1e-3
+      ) {
+        const cmd = new ModelPositionCommand({
+          previousPosition: prev,
+          newPosition: curr,
+          description: `Model Taşındı (X:${curr.x.toFixed(1)} Y:${curr.y.toFixed(1)} Z:${curr.z.toFixed(1)})`,
+          subType: 'position_gizmo',
+          isContinuous: false
+        });
+        executeCommand(cmd);
+      }
+    }
+  };
+
+  const handleStepPosition = (axis, delta) => {
+    const prev = modelPositionRef.current;
+    const next = {
+      ...prev,
+      [axis]: Math.round((prev[axis] + delta) * 10) / 10
+    };
+    const cmd = new ModelPositionCommand({
+      previousPosition: prev,
+      newPosition: next,
+      description: `Model Ötelendi (${axis.toUpperCase()}: ${delta > 0 ? '+' : ''}${delta}mm)`,
+      subType: 'position_step',
+      isContinuous: false
+    });
+    executeCommand(cmd);
+    setStatusMessage(`Model konumu güncellendi (${axis.toUpperCase()}: ${next[axis]}mm).`);
+  };
+
+  const handleResetPosition = () => {
+    const prev = modelPositionRef.current;
+    if (Math.abs(prev.x) < 1e-3 && Math.abs(prev.y) < 1e-3 && Math.abs(prev.z) < 1e-3) {
+      setStatusMessage('Model zaten başlangıç merkezinde (0, 0, 0).');
+      return;
+    }
+    const cmd = new ModelPositionCommand({
+      previousPosition: prev,
+      newPosition: { x: 0, y: 0, z: 0 },
+      description: 'Model Konumu Sıfırlandı (0, 0, 0)',
+      subType: 'position_reset',
+      isContinuous: false
+    });
+    executeCommand(cmd);
+    setStatusMessage('Model başlangıç merkezine (0, 0, 0) sıfırlandı.');
+  };
+
+  const handleCenterModel = () => {
+    const prev = modelPositionRef.current;
+    const next = { x: 0, y: prev.y, z: 0 };
+    if (Math.abs(prev.x) < 1e-3 && Math.abs(prev.z) < 1e-3) {
+      setStatusMessage('Model zaten X ve Z eksenlerinde tabla merkezinde.');
+      return;
+    }
+    const cmd = new ModelPositionCommand({
+      previousPosition: prev,
+      newPosition: next,
+      description: 'Model Tablada Ortalandı (X:0, Z:0)',
+      subType: 'position_center',
+      isContinuous: false
+    });
+    executeCommand(cmd);
+    setStatusMessage('Model tabla merkezine (X:0, Z:0) hizalandı.');
+  };
+
+  const handleDropToBed = (floorY = -45) => {
+    if (!model) return;
+    model.updateMatrixWorld(true);
+    const box = new THREE.Box3().setFromObject(model);
+    if (box.isEmpty()) return;
+
+    const prev = modelPositionRef.current;
+    const deltaY = floorY - box.min.y;
+    const newY = Math.round((prev.y + deltaY) * 10) / 10;
+
+    if (Math.abs(deltaY) < 0.1) {
+      setStatusMessage('Model zaten baskı tablasına (zemin ızgarası) tam temas ediyor.');
+      return;
+    }
+
+    const next = { ...prev, y: newY };
+    const cmd = new ModelPositionCommand({
+      previousPosition: prev,
+      newPosition: next,
+      description: `Model Baskı Tablasına Oturtuldu (Y: ${newY}mm)`,
+      subType: 'position_bed',
+      isContinuous: false
+    });
+    executeCommand(cmd);
+    setStatusMessage(`Model baskı tablasına oturtuldu (Zemin: ${floorY}mm, Fark: ${deltaY > 0 ? '+' : ''}${deltaY.toFixed(1)}mm).`);
+  };
+
+  /**
    * Direct STL Downloads
    */
   const handleExportPartA = () => {
@@ -2155,6 +2416,21 @@ export function App() {
         onResetScale={handleResetScale}
         isUniformScale={isUniformScale}
         onToggleUniformScale={() => setIsUniformScale((prev) => !prev)}
+        // Model Position & Bed Alignment props
+        modelPosition={modelPosition}
+        onModelPositionChange={handleModelPositionChange}
+        onStepPosition={handleStepPosition}
+        onResetPosition={handleResetPosition}
+        onCenterModel={handleCenterModel}
+        onDropToBed={handleDropToBed}
+        transformGizmoMode={transformGizmoMode}
+        onSetTransformGizmoMode={setTransformGizmoMode}
+        isTranslateGizmoActive={isTranslateGizmoActive}
+        onToggleTranslateGizmo={() => setIsTranslateGizmoActive((prev) => !prev)}
+        showFootprint={showFootprint}
+        onToggleFootprint={() => setShowFootprint((prev) => !prev)}
+        showDimensionLabels={showDimensionLabels}
+        onToggleDimensionLabels={() => setShowDimensionLabels((prev) => !prev)}
         materialDensity={materialDensity}
         onMaterialDensityChange={setMaterialDensity}
         // History props
@@ -2190,10 +2466,17 @@ export function App() {
         onAddBatchFiles={handleAddBatchFiles}
         onAddAllBatchPresets={handleAddAllBatchPresets}
         onClearBatchQueue={handleClearBatchQueue}
+        onAddCurrentModelToQueue={handleAddCurrentModelToQueue}
+        hasActiveModel={!!model}
+        currentModelName={modelName}
+        activeClippingConfig={clippingConfig}
+        activePinConfig={pinConfig}
         batchSettings={batchSettings}
         onBatchSettingsChange={setBatchSettings}
         onSyncBatchWithViewport={handleSyncBatchWithViewport}
         onApplyBatchToViewport={handleApplyBatchToViewport}
+        onOpenCuttingPresetsModal={() => setIsCuttingPresetsModalOpen(true)}
+        onApplyCuttingPreset={handleApplyCuttingPreset}
       />
 
       {/* Right 3D Viewport Scene */}
@@ -2291,6 +2574,16 @@ export function App() {
             >
               <Sparkles className="w-3.5 h-3.5 text-amber-300" />
               <span className="hidden md:inline">Düz Taban</span>
+            </button>
+
+            {/* Quick Cutting & Pin Alignment Presets Button */}
+            <button
+              onClick={() => setIsCuttingPresetsModalOpen(true)}
+              className="bg-gray-900/90 hover:bg-gray-800 text-emerald-300 hover:text-white border border-emerald-500/40 hover:border-emerald-400 text-xs font-semibold px-3 py-1.5 rounded-full shadow-2xl flex items-center gap-1.5 transition active:scale-95"
+              title="Kesim ve Pim Hizalama Şablonları (Presets)"
+            >
+              <Bookmark className="w-3.5 h-3.5 text-emerald-400" />
+              <span className="hidden md:inline">Şablonlar</span>
             </button>
 
             {/* Quick Export Button when Split Result is active */}
@@ -2475,6 +2768,21 @@ export function App() {
           modelScale={modelScale}
           onModelScaleChange={handleModelScaleChange}
           onResetScale={handleResetScale}
+          // Model Position & Bed Placement props
+          modelPosition={modelPosition}
+          onModelPositionChange={handleModelPositionChange}
+          onPositionEnd={handlePositionDragEnd}
+          onDropToBed={handleDropToBed}
+          onCenterModel={handleCenterModel}
+          onResetPosition={handleResetPosition}
+          transformGizmoMode={transformGizmoMode}
+          onSetTransformGizmoMode={setTransformGizmoMode}
+          isTranslateGizmoActive={isTranslateGizmoActive}
+          onToggleTranslateGizmo={() => setIsTranslateGizmoActive((prev) => !prev)}
+          showFootprint={showFootprint}
+          onToggleFootprint={() => setShowFootprint((prev) => !prev)}
+          showDimensionLabels={showDimensionLabels}
+          onToggleDimensionLabels={() => setShowDimensionLabels((prev) => !prev)}
           // Mesh List Side Panel props
           isMeshListOpen={isMeshListOpen}
           onToggleMeshList={() => setIsMeshListOpen((prev) => !prev)}
@@ -2570,6 +2878,18 @@ export function App() {
         onApplyToViewport={handleApplyBatchToViewport}
         onLoadItemInViewport={handleLoadBatchItemInViewport}
         onNotify={(msg) => setStatusMessage(msg)}
+        isProcessing={isBatchProcessing}
+        currentProcessingId={currentBatchProcessingId}
+        onStartProcessing={handleStartBatchProcessing}
+        onCancelProcessing={handleCancelBatchProcessing}
+        onDownloadAllZip={handleDownloadAllBatchZip}
+        isExportingAll={isExportingBatchAll}
+        onAddCurrentModel={handleAddCurrentModelToQueue}
+        onAddFiles={handleAddBatchFiles}
+        onAddAllPresets={handleAddAllBatchPresets}
+        onClearQueue={handleClearBatchQueue}
+        hasActiveModel={!!model}
+        activeModelName={modelName}
       />
 
       {/* Automated Flat-Bottom Orientation Assistant Modal */}
@@ -2585,6 +2905,16 @@ export function App() {
           setHeatmapConfig((prev) => ({ ...prev, enabled: true }));
           setActiveControlsTab('overhang');
         }}
+      />
+
+      {/* Cutting & Pin Alignment Presets Modal */}
+      <CuttingPresetsModal
+        isOpen={isCuttingPresetsModalOpen}
+        onClose={() => setIsCuttingPresetsModalOpen(false)}
+        clippingConfig={clippingConfig}
+        pinConfig={pinConfig}
+        onApplyPreset={handleApplyCuttingPreset}
+        onNotify={(msg) => setStatusMessage(msg)}
       />
 
       {/* History Timeline Panel (Undo/Redo & Time Travel) */}

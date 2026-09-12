@@ -47,7 +47,11 @@ import {
   Unlink,
   Percent,
   Edit3,
-  FileSpreadsheet
+  FileSpreadsheet,
+  Bookmark,
+  SlidersHorizontal,
+  Move,
+  ArrowDownToLine
 } from 'lucide-react';
 import { SAMPLE_PRESETS } from '../utils/sampleModels';
 import { MATERIAL_THEMES } from '../utils/stlLoaderHelper';
@@ -63,6 +67,8 @@ import { OverhangSupportTab } from './OverhangSupportTab';
 import { ExportConfigPanel } from './ExportConfigPanel';
 import { BatchQueueTab } from './BatchQueueTab';
 import { VolumeMaterialTool } from './VolumeMaterialTool';
+import { CuttingPresetsPanel } from './CuttingPresetsPanel';
+import { BUILT_IN_CUTTING_PRESETS } from '../utils/cuttingPresetsStorage';
 import { getComplexityTier } from './PerformanceOverlay';
 import ConfigurationHistoryLog from './ConfigurationHistoryLog';
 import { loadConfigHistory, downloadConfigComparisonCSV } from '../utils/configHistoryStorage';
@@ -101,6 +107,8 @@ export function ControlsPanel({
   onChangeSelectionMode,
   pinConfig,
   onPinConfigChange,
+  onOpenCuttingPresetsModal,
+  onApplyCuttingPreset,
   // Slicing & Exploded props
   splitResult,
   onExecuteLassoSplit,
@@ -162,6 +170,21 @@ export function ControlsPanel({
   onResetScale,
   isUniformScale = true,
   onToggleUniformScale,
+  // Model Position & Bed Alignment props
+  modelPosition = { x: 0, y: 0, z: 0 },
+  onModelPositionChange,
+  onStepPosition,
+  onResetPosition,
+  onDropToBed,
+  onCenterModel,
+  transformGizmoMode = 'rotate',
+  onSetTransformGizmoMode,
+  isTranslateGizmoActive = false,
+  onToggleTranslateGizmo,
+  showFootprint = true,
+  onToggleFootprint,
+  showDimensionLabels = true,
+  onToggleDimensionLabels,
   // Material Density & Mass props
   materialDensity = 1.24,
   onMaterialDensityChange,
@@ -199,6 +222,11 @@ export function ControlsPanel({
   onAddBatchFiles,
   onAddAllBatchPresets,
   onClearBatchQueue,
+  onAddCurrentModelToQueue,
+  hasActiveModel = false,
+  currentModelName = null,
+  activeClippingConfig = null,
+  activePinConfig = null,
   batchSettings,
   onBatchSettingsChange,
   onSyncBatchWithViewport,
@@ -329,6 +357,35 @@ export function ControlsPanel({
     Math.abs((modelScale?.x ?? 1) - 1) > 1e-3 ||
     Math.abs((modelScale?.y ?? 1) - 1) > 1e-3 ||
     Math.abs((modelScale?.z ?? 1) - 1) > 1e-3;
+
+  const isPositioned =
+    Math.abs(modelPosition?.x ?? 0) > 1e-2 ||
+    Math.abs(modelPosition?.y ?? 0) > 1e-2 ||
+    Math.abs(modelPosition?.z ?? 0) > 1e-2;
+
+  // Real-time Axis-Aligned Bounding Box (AABB) calculation for live dimensions & positioning aid
+  const liveAABB = useMemo(() => {
+    if (!model) return null;
+    model.updateMatrixWorld(true);
+    const box = new THREE.Box3().setFromObject(model);
+    if (box.isEmpty()) return null;
+    const size = new THREE.Vector3();
+    const center = new THREE.Vector3();
+    box.getSize(size);
+    box.getCenter(center);
+    const floorY = -45;
+    const bedClearance = box.min.y - floorY;
+    const diagonal = Math.sqrt(size.x * size.x + size.y * size.y + size.z * size.z);
+    return {
+      size,
+      center,
+      min: box.min,
+      max: box.max,
+      bedClearance,
+      isFlushWithBed: Math.abs(bedClearance) < 0.25,
+      diagonal
+    };
+  }, [model, modelRotation, modelScale, modelPosition]);
 
   // Scale change handlers
   const handleSetUniformScale = (val, pushToHist = true) => {
@@ -660,11 +717,11 @@ export function ControlsPanel({
           }`}
         >
           <Maximize2 className="w-3.5 h-3.5" />
-          <span>Ölçek & Döndür</span>
+          <span>Dönüşüm & Konum</span>
           {(isRotateGizmoActive ||
-            Math.abs((modelScale?.x ?? 1) - 1) > 1e-3 ||
-            Math.abs((modelScale?.y ?? 1) - 1) > 1e-3 ||
-            Math.abs((modelScale?.z ?? 1) - 1) > 1e-3) && (
+            isTranslateGizmoActive ||
+            isScaled ||
+            isPositioned) && (
             <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-ping" />
           )}
         </button>
@@ -739,6 +796,19 @@ export function ControlsPanel({
               {batchQueue.length}
             </span>
           )}
+        </button>
+
+        <button
+          onClick={() => setActiveTab('presets')}
+          className={`py-2 px-3 text-xs font-semibold rounded-t-xl transition flex items-center gap-1.5 shrink-0 ${
+            activeTab === 'presets'
+              ? 'bg-gray-850 text-emerald-400 border-t border-l border-r border-gray-700 border-b-2 border-b-transparent'
+              : 'text-gray-400 hover:text-gray-200'
+          }`}
+          title="Kesim & Pim Hizalama Şablonları (Presets)"
+        >
+          <Bookmark className="w-3.5 h-3.5 text-emerald-400" />
+          <span>Şablonlar</span>
         </button>
 
         {splitResult && (
@@ -914,6 +984,114 @@ export function ControlsPanel({
               >
                 <PenTool className="w-3.5 h-3.5" />
                 <span>Yüzey Kemendi</span>
+              </button>
+            </div>
+          </div>
+
+          {/* Quick Cutting & Pin Alignment Presets Section */}
+          <div className="p-3 bg-gray-950/70 border-b border-gray-800 flex flex-col gap-2">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-1.5 text-xs text-emerald-400 font-bold">
+                <Bookmark className="w-3.5 h-3.5 text-emerald-400" />
+                <span>Hızlı Kesim & Pim Şablonları</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  if (onOpenCuttingPresetsModal) {
+                    onOpenCuttingPresetsModal();
+                  } else {
+                    setActiveTab('presets');
+                  }
+                }}
+                className="text-[10px] font-semibold text-emerald-300 hover:text-emerald-200 bg-emerald-950/80 hover:bg-emerald-900 border border-emerald-800/60 px-2 py-0.5 rounded-md transition flex items-center gap-1"
+                title="Tüm Şablonları İncele & Yeni Şablon Kaydet"
+              >
+                <SlidersHorizontal className="w-3 h-3" />
+                <span>Tümü ({BUILT_IN_CUTTING_PRESETS.length}+)</span>
+              </button>
+            </div>
+
+            {/* Quick Pick Chips */}
+            <div className="grid grid-cols-2 gap-1.5">
+              <button
+                type="button"
+                onClick={() => {
+                  const p = BUILT_IN_CUTTING_PRESETS.find((x) => x.id === 'preset_standard_fdm_dowel');
+                  if (p && onApplyCuttingPreset) onApplyCuttingPreset(p);
+                }}
+                className={`p-2 rounded-lg border text-left transition flex flex-col gap-0.5 ${
+                  pinConfig?.diameter === 8 && pinConfig?.clearance === 0.2
+                    ? 'bg-emerald-950/70 border-emerald-500 text-emerald-200 shadow-sm ring-1 ring-emerald-500/40'
+                    : 'bg-gray-900/80 hover:bg-gray-850 border-gray-800 text-gray-300 hover:border-gray-700'
+                }`}
+                title="Standart PLA/PETG silindirik dübel (Ø8×10mm, 0.20mm tolerans)"
+              >
+                <div className="flex items-center justify-between">
+                  <span className="text-[11px] font-bold text-white">Standart FDM</span>
+                  <span className="text-[9px] font-mono text-emerald-400 font-bold">Ø8mm</span>
+                </div>
+                <span className="text-[10px] text-gray-400">Pim + Yuva (0.20mm fit)</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  const p = BUILT_IN_CUTTING_PRESETS.find((x) => x.id === 'preset_heavy_duty_hex_dowel');
+                  if (p && onApplyCuttingPreset) onApplyCuttingPreset(p);
+                }}
+                className={`p-2 rounded-lg border text-left transition flex flex-col gap-0.5 ${
+                  pinConfig?.type === 'hex' && pinConfig?.diameter === 10
+                    ? 'bg-emerald-950/70 border-emerald-500 text-emerald-200 shadow-sm ring-1 ring-emerald-500/40'
+                    : 'bg-gray-900/80 hover:bg-gray-850 border-gray-800 text-gray-300 hover:border-gray-700'
+                }`}
+                title="Ağır hizmet altıgen pim (Ø10×15mm, 0.25mm tolerans, çift soket)"
+              >
+                <div className="flex items-center justify-between">
+                  <span className="text-[11px] font-bold text-white">Ağır Altıgen</span>
+                  <span className="text-[9px] font-mono text-cyan-400 font-bold">Ø10mm</span>
+                </div>
+                <span className="text-[10px] text-gray-400">Çift Yuva + Ayrı Pim</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  const p = BUILT_IN_CUTTING_PRESETS.find((x) => x.id === 'preset_resin_sla_micro');
+                  if (p && onApplyCuttingPreset) onApplyCuttingPreset(p);
+                }}
+                className={`p-2 rounded-lg border text-left transition flex flex-col gap-0.5 ${
+                  pinConfig?.diameter === 4 && pinConfig?.clearance === 0.1
+                    ? 'bg-emerald-950/70 border-emerald-500 text-emerald-200 shadow-sm ring-1 ring-emerald-500/40'
+                    : 'bg-gray-900/80 hover:bg-gray-850 border-gray-800 text-gray-300 hover:border-gray-700'
+                }`}
+                title="SLA/Reçine veya 0.2mm nozul hassas mikro pim (Ø4×6mm, 0.10mm tolerans)"
+              >
+                <div className="flex items-center justify-between">
+                  <span className="text-[11px] font-bold text-white">SLA Mikro Pim</span>
+                  <span className="text-[9px] font-mono text-purple-400 font-bold">Ø4mm</span>
+                </div>
+                <span className="text-[10px] text-gray-400">Hassas Fit (0.10mm)</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  const p = BUILT_IN_CUTTING_PRESETS.find((x) => x.id === 'preset_clean_flat_split');
+                  if (p && onApplyCuttingPreset) onApplyCuttingPreset(p);
+                }}
+                className={`p-2 rounded-lg border text-left transition flex flex-col gap-0.5 ${
+                  clippingConfig?.addPinOnSlice === false || pinConfig?.mode === 'flat'
+                    ? 'bg-emerald-950/70 border-emerald-500 text-emerald-200 shadow-sm ring-1 ring-emerald-500/40'
+                    : 'bg-gray-900/80 hover:bg-gray-850 border-gray-800 text-gray-300 hover:border-gray-700'
+                }`}
+                title="Pimsiz temiz düz kesim (Yalnızca düzlem ile ikiye böl)"
+              >
+                <div className="flex items-center justify-between">
+                  <span className="text-[11px] font-bold text-white">Düz Kesim</span>
+                  <span className="text-[9px] font-mono text-amber-400 font-bold">Düzlem</span>
+                </div>
+                <span className="text-[10px] text-gray-400">Pimsiz, yapıştırma yüzeyi</span>
               </button>
             </div>
           </div>
@@ -3634,10 +3812,25 @@ export function ControlsPanel({
           onAddFiles={onAddBatchFiles}
           onAddAllPresets={onAddAllBatchPresets}
           onClearQueue={onClearBatchQueue}
+          onAddCurrentModel={onAddCurrentModelToQueue}
+          hasActiveModel={hasActiveModel}
+          currentModelName={currentModelName}
+          activeClippingConfig={activeClippingConfig}
+          activePinConfig={activePinConfig}
           batchSettings={batchSettings}
           onBatchSettingsChange={onBatchSettingsChange}
           onSyncWithViewport={onSyncBatchWithViewport}
           onApplyToViewport={onApplyBatchToViewport}
+        />
+      )}
+
+      {/* Tab: Cutting & Pin Alignment Presets */}
+      {activeTab === 'presets' && (
+        <CuttingPresetsPanel
+          clippingConfig={clippingConfig}
+          pinConfig={pinConfig}
+          onApplyPreset={onApplyCuttingPreset}
+          onNotify={onNotify}
         />
       )}
 

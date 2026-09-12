@@ -34,6 +34,8 @@ import {
   Activity,
   Scale,
   Box,
+  Move,
+  ArrowDownToLine,
   AlertTriangle,
   Cpu
 } from 'lucide-react';
@@ -115,15 +117,20 @@ export function createExplicitWebGL2Renderer(canvas, customOptions = {}) {
 }
 
 /**
- * Inner Rotatable Model Mesh with Three.js TransformControls rotation rings
+ * Inner Rotatable & Positionable Model Mesh with Three.js TransformControls
  */
 function RotatableModelMesh({
   model,
   modelRotation,
   modelScale,
+  modelPosition,
   onModelRotationChange,
   onRotationEnd,
+  onModelPositionChange,
+  onPositionEnd,
   isRotateGizmoActive,
+  isTranslateGizmoActive,
+  transformGizmoMode = 'rotate',
   snapAngle,
   controlsRef,
   clippingConfig,
@@ -132,7 +139,7 @@ function RotatableModelMesh({
 }) {
   const transformRef = useRef();
 
-  // Synchronize 3D mesh rotation and scale with external states
+  // Synchronize 3D mesh rotation, scale and position with external states
   useEffect(() => {
     if (model) {
       model.rotation.set(
@@ -145,9 +152,14 @@ function RotatableModelMesh({
         modelScale?.y ?? 1,
         modelScale?.z ?? 1
       );
+      model.position.set(
+        modelPosition?.x ?? 0,
+        modelPosition?.y ?? 0,
+        modelPosition?.z ?? 0
+      );
       model.updateMatrixWorld(true);
     }
-  }, [model, modelRotation, modelScale]);
+  }, [model, modelRotation, modelScale, modelPosition]);
 
   useEffect(() => {
     const controls = transformRef.current;
@@ -158,30 +170,47 @@ function RotatableModelMesh({
         controlsRef.current.enabled = !e.value;
       }
       if (!e.value) {
-        if (onRotationEnd) onRotationEnd();
+        if (transformGizmoMode === 'translate') {
+          if (onPositionEnd) onPositionEnd();
+        } else {
+          if (onRotationEnd) onRotationEnd();
+        }
       }
     };
 
     const handleObjectChange = () => {
       if (model && controls.dragging) {
-        const rx = THREE.MathUtils.radToDeg(model.rotation.x);
-        const ry = THREE.MathUtils.radToDeg(model.rotation.y);
-        const rz = THREE.MathUtils.radToDeg(model.rotation.z);
-        const norm = (deg) => {
-          let d = Math.round(deg * 10) / 10;
-          d = d % 360;
-          if (d > 180) d -= 360;
-          if (d < -180) d += 360;
-          return Math.round(d * 10) / 10;
-        };
-        onModelRotationChange(
-          {
-            x: norm(rx),
-            y: norm(ry),
-            z: norm(rz)
-          },
-          false
-        );
+        if (transformGizmoMode === 'translate') {
+          if (onModelPositionChange) {
+            onModelPositionChange(
+              {
+                x: Math.round(model.position.x * 10) / 10,
+                y: Math.round(model.position.y * 10) / 10,
+                z: Math.round(model.position.z * 10) / 10
+              },
+              false
+            );
+          }
+        } else {
+          const rx = THREE.MathUtils.radToDeg(model.rotation.x);
+          const ry = THREE.MathUtils.radToDeg(model.rotation.y);
+          const rz = THREE.MathUtils.radToDeg(model.rotation.z);
+          const norm = (deg) => {
+            let d = Math.round(deg * 10) / 10;
+            d = d % 360;
+            if (d > 180) d -= 360;
+            if (d < -180) d += 360;
+            return Math.round(d * 10) / 10;
+          };
+          onModelRotationChange?.(
+            {
+              x: norm(rx),
+              y: norm(ry),
+              z: norm(rz)
+            },
+            false
+          );
+        }
       }
     };
 
@@ -192,9 +221,10 @@ function RotatableModelMesh({
       controls.removeEventListener('dragging-changed', handleDragging);
       controls.removeEventListener('objectChange', handleObjectChange);
     };
-  }, [model, controlsRef, onModelRotationChange, onRotationEnd]);
+  }, [model, controlsRef, transformGizmoMode, onModelRotationChange, onRotationEnd, onModelPositionChange, onPositionEnd]);
 
   const snapRad = snapAngle ? THREE.MathUtils.degToRad(snapAngle) : null;
+  const isGizmoActive = transformGizmoMode === 'translate' ? isTranslateGizmoActive : isRotateGizmoActive;
 
   return (
     <>
@@ -223,13 +253,14 @@ function RotatableModelMesh({
           </mesh>
         )}
 
-      {isRotateGizmoActive && model && (
+      {isGizmoActive && model && (
         <TransformControls
           ref={transformRef}
           object={model}
-          mode="rotate"
+          mode={transformGizmoMode === 'translate' ? 'translate' : 'rotate'}
           size={0.85}
-          rotationSnap={snapRad}
+          rotationSnap={transformGizmoMode === 'rotate' ? snapRad : null}
+          translationSnap={transformGizmoMode === 'translate' ? 1 : null}
         />
       )}
     </>
@@ -416,6 +447,21 @@ export function Viewport3D({
   modelScale = { x: 1, y: 1, z: 1 },
   onModelScaleChange,
   onResetScale,
+  // Model Position & Bed Placement props
+  modelPosition = { x: 0, y: 0, z: 0 },
+  onModelPositionChange,
+  onPositionEnd,
+  onDropToBed,
+  onCenterModel,
+  onResetPosition,
+  transformGizmoMode = 'rotate',
+  onSetTransformGizmoMode,
+  isTranslateGizmoActive = false,
+  onToggleTranslateGizmo,
+  showFootprint = true,
+  onToggleFootprint,
+  showDimensionLabels = true,
+  onToggleDimensionLabels,
   // Mesh List Outliner props
   isMeshListOpen = false,
   onToggleMeshList,
@@ -591,6 +637,32 @@ export function Viewport3D({
     const plane = new THREE.Plane(effNormal.clone().normalize(), -effOffset);
     return plane.distanceToPoint(measurePointB);
   }, [measurePointB, effNormal, effOffset]);
+
+  // Live bounding box dimensions, center coordinates and build plate clearance
+  const liveDimensions = useMemo(() => {
+    if (!model) return null;
+    model.updateMatrixWorld(true);
+    const box = new THREE.Box3().setFromObject(model);
+    if (box.isEmpty()) return null;
+    const size = new THREE.Vector3();
+    const center = new THREE.Vector3();
+    box.getSize(size);
+    box.getCenter(center);
+    const floorY = -45;
+    const bedClearance = box.min.y - floorY;
+    const diagonal = Math.sqrt(size.x * size.x + size.y * size.y + size.z * size.z);
+    return {
+      size,
+      center,
+      min: box.min,
+      max: box.max,
+      bedClearance,
+      isFlush: Math.abs(bedClearance) < 0.25,
+      diagonal
+    };
+  }, [model, modelRotation, modelScale, modelPosition]);
+
+  const [isDimHUDMinimized, setIsDimHUDMinimized] = useState(false);
 
   // Snap cut-plane to measured points
   const handleSnapPlaneToPoint = (pt) => {
@@ -1363,6 +1435,181 @@ export function Viewport3D({
         </div>
       )}
 
+      {/* Floating Real-Time Bounding Box & Dimensions HUD */}
+      {showBoundingBox && liveDimensions && (
+        <div className="absolute bottom-4 left-4 z-20 bg-gray-950/92 border border-cyan-500/50 rounded-2xl p-3 shadow-2xl backdrop-blur-xl max-w-xs sm:max-w-sm animate-in slide-in-from-bottom-2 duration-200 select-none">
+          {/* Header */}
+          <div className="flex items-center justify-between pb-2 mb-2 border-b border-gray-800">
+            <div className="flex items-center gap-2">
+              <div className="w-2.5 h-2.5 rounded-full bg-cyan-400 animate-pulse" />
+              <span className="text-xs font-bold text-white flex items-center gap-1.5">
+                <Box className="w-3.5 h-3.5 text-cyan-400" />
+                <span>Canlı Boyutlar & Konum (AABB)</span>
+              </span>
+            </div>
+            <div className="flex items-center gap-1">
+              <button
+                onClick={() => setIsDimHUDMinimized((prev) => !prev)}
+                className="text-gray-400 hover:text-gray-200 p-1 rounded transition text-[10px] font-mono"
+                title={isDimHUDMinimized ? 'Genişlet' : 'Küçült'}
+              >
+                {isDimHUDMinimized ? '▲' : '▼'}
+              </button>
+              <button
+                onClick={onToggleBoundingBox}
+                className="text-gray-400 hover:text-gray-200 p-1 rounded transition"
+                title="Sınır Kutusunu Kapat"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          </div>
+
+          {!isDimHUDMinimized ? (
+            <>
+              {/* Real-time Dimensions Grid (X, Y, Z) */}
+              <div className="grid grid-cols-3 gap-1.5 mb-2.5">
+                <div className="bg-gray-900/80 p-1.5 rounded-lg border border-red-500/30 text-center">
+                  <div className="text-[10px] text-red-400 font-semibold flex items-center justify-center gap-1">
+                    <span className="w-1.5 h-1.5 rounded-full bg-red-400" />
+                    Genişlik (X)
+                  </div>
+                  <div className="text-xs font-mono font-bold text-white mt-0.5">
+                    {formatLength(liveDimensions.size.x, isImperial ? 2 : 1)}
+                  </div>
+                </div>
+                <div className="bg-gray-900/80 p-1.5 rounded-lg border border-green-500/30 text-center">
+                  <div className="text-[10px] text-green-400 font-semibold flex items-center justify-center gap-1">
+                    <span className="w-1.5 h-1.5 rounded-full bg-green-400" />
+                    Yükseklik (Y)
+                  </div>
+                  <div className="text-xs font-mono font-bold text-white mt-0.5">
+                    {formatLength(liveDimensions.size.y, isImperial ? 2 : 1)}
+                  </div>
+                </div>
+                <div className="bg-gray-900/80 p-1.5 rounded-lg border border-blue-500/30 text-center">
+                  <div className="text-[10px] text-blue-400 font-semibold flex items-center justify-center gap-1">
+                    <span className="w-1.5 h-1.5 rounded-full bg-blue-400" />
+                    Derinlik (Z)
+                  </div>
+                  <div className="text-xs font-mono font-bold text-white mt-0.5">
+                    {formatLength(liveDimensions.size.z, isImperial ? 2 : 1)}
+                  </div>
+                </div>
+              </div>
+
+              {/* Real-time Center Position & Bed Distance */}
+              <div className="bg-gray-900/60 p-2 rounded-xl border border-gray-800 flex flex-col gap-1.5 text-[11px] mb-2.5">
+                <div className="flex items-center justify-between">
+                  <span className="text-gray-400">Merkez Konumu:</span>
+                  <span className="font-mono text-amber-300 font-semibold">
+                    X:{liveDimensions.center.x.toFixed(1)} Y:{liveDimensions.center.y.toFixed(1)} Z:{liveDimensions.center.z.toFixed(1)} mm
+                  </span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-gray-400">Tabla Teması:</span>
+                  <span
+                    className={`font-mono font-bold ${
+                      liveDimensions.isFlush
+                        ? 'text-emerald-400'
+                        : liveDimensions.bedClearance > 0
+                        ? 'text-sky-400'
+                        : 'text-red-400'
+                    }`}
+                  >
+                    {liveDimensions.isFlush
+                      ? '✓ Tablada Sıfır (0.0 mm)'
+                      : `${liveDimensions.bedClearance > 0 ? '+' : ''}${formatLength(
+                          liveDimensions.bedClearance,
+                          isImperial ? 2 : 1
+                        )}`}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-gray-400">3D Köşe Açıklığı:</span>
+                  <span className="font-mono text-cyan-300">
+                    {formatLength(liveDimensions.diagonal, isImperial ? 2 : 1)}
+                  </span>
+                </div>
+              </div>
+
+              {/* Quick Positioning Actions */}
+              <div className="flex items-center gap-1.5 mb-2">
+                {onDropToBed && (
+                  <button
+                    onClick={() => onDropToBed(-45)}
+                    className="flex-1 py-1 px-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-[11px] font-semibold transition flex items-center justify-center gap-1 shadow-sm"
+                    title="Modelin en alt noktasını zemin tablasına (Y = -45) oturtur"
+                  >
+                    <ArrowDownToLine className="w-3 h-3" />
+                    <span>Tablaya Oturt</span>
+                  </button>
+                )}
+                {onCenterModel && (
+                  <button
+                    onClick={onCenterModel}
+                    className="flex-1 py-1 px-2 bg-gray-800 hover:bg-gray-700 text-gray-200 border border-gray-700 rounded-lg text-[11px] font-semibold transition flex items-center justify-center gap-1 shadow-sm"
+                    title="Modeli X ve Z eksenlerinde tabla merkezine hizalar"
+                  >
+                    <Crosshair className="w-3 h-3 text-cyan-400" />
+                    <span>Ortala</span>
+                  </button>
+                )}
+                {onToggleTranslateGizmo && (
+                  <button
+                    onClick={() => {
+                      if (onSetTransformGizmoMode) onSetTransformGizmoMode('translate');
+                      onToggleTranslateGizmo();
+                    }}
+                    className={`py-1 px-2 rounded-lg text-[11px] font-semibold border transition flex items-center justify-center gap-1 shadow-sm ${
+                      isTranslateGizmoActive && transformGizmoMode === 'translate'
+                        ? 'bg-amber-500 text-gray-950 border-amber-400'
+                        : 'bg-gray-800 hover:bg-gray-700 text-amber-300 border-gray-700'
+                    }`}
+                    title="3D Taşıma Oklarını Aç/Kapat"
+                  >
+                    <Move className="w-3 h-3" />
+                    <span>{isTranslateGizmoActive && transformGizmoMode === 'translate' ? 'Taşıma: Açık' : 'Taşı'}</span>
+                  </button>
+                )}
+              </div>
+
+              {/* Display Options Checkboxes */}
+              <div className="flex items-center justify-between pt-2 border-t border-gray-800/80 text-[10px] text-gray-400">
+                <label className="flex items-center gap-1 cursor-pointer hover:text-gray-300">
+                  <input
+                    type="checkbox"
+                    checked={showDimensionLabels}
+                    onChange={onToggleDimensionLabels}
+                    className="rounded bg-gray-900 border-gray-700 text-cyan-500 focus:ring-0 w-3 h-3"
+                  />
+                  <span>3D Etiketler</span>
+                </label>
+                <label className="flex items-center gap-1 cursor-pointer hover:text-gray-300">
+                  <input
+                    type="checkbox"
+                    checked={showFootprint}
+                    onChange={onToggleFootprint}
+                    className="rounded bg-gray-900 border-gray-700 text-emerald-500 focus:ring-0 w-3 h-3"
+                  />
+                  <span>Tabla İzdüşümü</span>
+                </label>
+              </div>
+            </>
+          ) : (
+            /* Minimized Bar */
+            <div className="flex items-center justify-between text-xs font-mono">
+              <span className="text-gray-300">
+                {formatLength(liveDimensions.size.x, isImperial ? 1 : 0)} × {formatLength(liveDimensions.size.y, isImperial ? 1 : 0)} × {formatLength(liveDimensions.size.z, isImperial ? 1 : 0)}
+              </span>
+              <span className={`text-[10px] font-bold ${liveDimensions.isFlush ? 'text-emerald-400' : 'text-sky-400'}`}>
+                {liveDimensions.isFlush ? 'Tablada' : `+${formatLength(liveDimensions.bedClearance, 1)}`}
+              </span>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Floating Cross-Section & Internal Geometry HUD Overlay */}
       <CrossSectionHUD
         isOpen={isCrossSectionHUDOpen}
@@ -1567,9 +1814,14 @@ export function Viewport3D({
                 model={model}
                 modelRotation={modelRotation}
                 modelScale={modelScale}
+                modelPosition={modelPosition}
                 onModelRotationChange={onModelRotationChange}
                 onRotationEnd={onRotationEnd}
+                onModelPositionChange={onModelPositionChange}
+                onPositionEnd={onPositionEnd}
                 isRotateGizmoActive={isRotateGizmoActive}
+                isTranslateGizmoActive={isTranslateGizmoActive}
+                transformGizmoMode={transformGizmoMode}
                 snapAngle={snapAngle}
                 controlsRef={controlsRef}
                 clippingConfig={clippingConfig}
@@ -1602,6 +1854,10 @@ export function Viewport3D({
                 color="#06b6d4"
                 modelRotation={modelRotation}
                 modelScale={modelScale}
+                modelPosition={modelPosition}
+                showDimensionLabels={showDimensionLabels}
+                showFootprint={showFootprint}
+                floorY={-45}
               />
 
               {/* 3D Clipping Plane Visual Helper Sheet */}

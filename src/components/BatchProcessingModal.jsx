@@ -1,4 +1,4 @@
-import React, { useState, useRef, useMemo } from 'react';
+import React, { useState, useRef, useMemo, useEffect } from 'react';
 import * as THREE from 'three';
 import {
   Layers,
@@ -26,7 +26,9 @@ import {
   FolderArchive,
   RefreshCw,
   Info,
-  Check
+  Check,
+  Bookmark,
+  BookmarkCheck
 } from 'lucide-react';
 import { parseCustomSTL, loadSamplePreset } from '../utils/stlLoaderHelper';
 import { SAMPLE_PRESETS } from '../utils/sampleModels';
@@ -37,6 +39,7 @@ import {
   downloadBatchProcessedZip,
   formatBytes
 } from '../utils/stlExporter';
+import { loadAllCuttingPresets } from '../utils/cuttingPresetsStorage';
 
 export function BatchProcessingModal({
   isOpen,
@@ -49,7 +52,19 @@ export function BatchProcessingModal({
   onNotify,
   batchSettings,
   onBatchSettingsChange,
-  onApplyToViewport
+  onApplyToViewport,
+  isProcessing: externalIsProcessing = null,
+  currentProcessingId: externalCurrentProcessingId = null,
+  onStartProcessing: externalOnStartProcessing = null,
+  onCancelProcessing: externalOnCancelProcessing = null,
+  onDownloadAllZip: externalOnDownloadAllZip = null,
+  isExportingAll: externalIsExportingAll = null,
+  onAddCurrentModel = null,
+  onAddFiles = null,
+  onAddAllPresets = null,
+  onClearQueue = null,
+  hasActiveModel = false,
+  activeModelName = null
 }) {
   // Shared Batch Cut Plane & Pin Configuration State
   const [localBatchClipping, setLocalBatchClipping] = useState({
@@ -98,11 +113,65 @@ export function BatchProcessingModal({
     }
   };
 
-  const [isProcessing, setIsProcessing] = useState(false);
-  const [isExportingAll, setIsExportingAll] = useState(false);
-  const [currentProcessingId, setCurrentProcessingId] = useState(null);
+  const [internalIsProcessing, setInternalIsProcessing] = useState(false);
+  const [internalIsExportingAll, setInternalIsExportingAll] = useState(false);
+  const [internalCurrentProcessingId, setInternalCurrentProcessingId] = useState(null);
+
+  const isProcessing = externalIsProcessing !== null ? externalIsProcessing : internalIsProcessing;
+  const isExportingAll = externalIsExportingAll !== null ? externalIsExportingAll : internalIsExportingAll;
+  const currentProcessingId = externalCurrentProcessingId !== null ? externalCurrentProcessingId : internalCurrentProcessingId;
+
   const [activeSubTab, setActiveSubTab] = useState('queue'); // 'queue' | 'settings' | 'results'
   const [isDragOver, setIsDragOver] = useState(false);
+
+  // Saved Cutting & Pin Alignment Presets
+  const [availablePresets, setAvailablePresets] = useState(() => loadAllCuttingPresets());
+  const [selectedPresetId, setSelectedPresetId] = useState('');
+
+  useEffect(() => {
+    if (isOpen) {
+      setAvailablePresets(loadAllCuttingPresets());
+    }
+  }, [isOpen]);
+
+  const handleApplyPresetToBatch = (preset) => {
+    if (!preset) return;
+    const newClipping = {
+      ...batchClipping,
+      axis: preset.clippingConfig?.axis || batchClipping.axis || 'y',
+      offset: typeof preset.clippingConfig?.offset === 'number' ? preset.clippingConfig.offset : (batchClipping.offset || 0),
+      offsetMode: preset.clippingConfig?.offsetMode || batchClipping.offsetMode || 'absolute',
+      negate: typeof preset.clippingConfig?.negate === 'boolean' ? preset.clippingConfig.negate : (batchClipping.negate || false),
+      addPinOnSlice: preset.clippingConfig?.addPinOnSlice !== false
+    };
+
+    const newPin = {
+      ...batchPin,
+      mode: preset.pinConfig?.mode || batchPin.mode || 'pin_and_hole',
+      diameter: preset.pinConfig?.diameter || batchPin.diameter || 8.0,
+      depth: preset.pinConfig?.depth || batchPin.depth || 10.0,
+      clearance: typeof preset.pinConfig?.clearance === 'number' ? preset.pinConfig.clearance : (batchPin.clearance ?? 0.2),
+      type: preset.pinConfig?.type || batchPin.type || 'cylinder',
+      taper: typeof preset.pinConfig?.taper === 'number' ? preset.pinConfig.taper : (batchPin.taper ?? 0.85),
+      snapToNormal: preset.pinConfig?.snapToNormal !== false,
+      snapToCenter: preset.pinConfig?.snapToCenter !== false,
+      flushFit: preset.pinConfig?.flushFit !== false
+    };
+
+    if (onBatchSettingsChange && batchSettings) {
+      onBatchSettingsChange({
+        ...batchSettings,
+        clipping: newClipping,
+        pin: newPin
+      });
+    } else {
+      setLocalBatchClipping(newClipping);
+      setLocalBatchPin(newPin);
+    }
+
+    setSelectedPresetId(preset.id);
+    onNotify?.(`"${preset.name}" şablonu toplu kesim ayarlarına uygulandı.`);
+  };
 
   // Cancellation ref for non-blocking abort
   const cancelRequestedRef = useRef(false);
@@ -253,10 +322,13 @@ export function BatchProcessingModal({
    * SEQUENTIAL BATCH PROCESSING LOOP
    * Iterates through all queue items one-by-one, parsing and slicing with identical shared settings.
    */
-  const handleStartProcessing = async () => {
+  const handleStartProcessing = async ({ autoExportZip = false } = {}) => {
+    if (externalOnStartProcessing) {
+      return externalOnStartProcessing({ autoExportZip, useCurrentViewport: false });
+    }
     if (queue.length === 0 || isProcessing) return;
 
-    setIsProcessing(true);
+    setInternalIsProcessing(true);
     cancelRequestedRef.current = false;
 
     // Resolve Normal Vector for the chosen axis
@@ -284,7 +356,7 @@ export function BatchProcessingModal({
         continue;
       }
 
-      setCurrentProcessingId(item.id);
+      setInternalCurrentProcessingId(item.id);
 
       // Step 1: Update status to 'processing'
       currentQueue[i] = {
@@ -301,7 +373,10 @@ export function BatchProcessingModal({
       try {
         let mesh, info;
 
-        if (item.isPreset) {
+        if (item.isCurrentModel && item.mesh) {
+          mesh = item.mesh.clone();
+          info = item.info;
+        } else if (item.isPreset) {
           const loaded = loadSamplePreset(item.presetId);
           mesh = loaded.mesh;
           info = loaded.info;
@@ -379,10 +454,16 @@ export function BatchProcessingModal({
       await new Promise(resolve => setTimeout(resolve, 60));
     }
 
-    setCurrentProcessingId(null);
-    setIsProcessing(false);
+    setInternalCurrentProcessingId(null);
+    setInternalIsProcessing(false);
     if (!cancelRequestedRef.current) {
-      onNotify?.(`Toplu işleme tamamlandı! (${completedCount + 1}/${totalCount} model hazır)`);
+      const completedItems = currentQueue.filter(it => it.status === 'completed' && it.result);
+      if (autoExportZip && completedItems.length > 0) {
+        onNotify?.(`${completedItems.length} model kesildi. Tek ZIP paketi indiriliyor...`);
+        await handleDownloadAllZip();
+      } else {
+        onNotify?.(`Toplu işleme tamamlandı! (${completedItems.length} model hazır)`);
+      }
     }
   };
 
@@ -390,9 +471,12 @@ export function BatchProcessingModal({
    * Cancels the sequential processing queue
    */
   const handleCancelProcessing = () => {
+    if (externalOnCancelProcessing) {
+      return externalOnCancelProcessing();
+    }
     cancelRequestedRef.current = true;
-    setIsProcessing(false);
-    setCurrentProcessingId(null);
+    setInternalIsProcessing(false);
+    setInternalCurrentProcessingId(null);
   };
 
   /**
@@ -443,10 +527,13 @@ export function BatchProcessingModal({
    * Downloads all completed models in a single consolidated ZIP file
    */
   const handleDownloadAllZip = async () => {
+    if (externalOnDownloadAllZip) {
+      return externalOnDownloadAllZip();
+    }
     const completedItems = queue.filter(item => item.status === 'completed' && item.result);
     if (completedItems.length === 0) return;
 
-    setIsExportingAll(true);
+    setInternalIsExportingAll(true);
     try {
       await downloadBatchProcessedZip(
         completedItems,
@@ -458,7 +545,7 @@ export function BatchProcessingModal({
       console.error(err);
       onNotify?.('Toplu ZIP indirme sırasında hata oluştu.');
     } finally {
-      setIsExportingAll(false);
+      setInternalIsExportingAll(false);
     }
   };
 
@@ -551,6 +638,93 @@ export function BatchProcessingModal({
         {/* Tab 1: Queue View */}
         {activeSubTab === 'queue' && (
           <div className="flex-1 overflow-y-auto p-4 flex flex-col gap-4">
+            {/* Live Shared Cut & Pin Configuration Summary Banner */}
+            <div className="bg-emerald-950/20 border border-emerald-500/30 rounded-xl p-3 flex flex-wrap items-center justify-between gap-2 shadow-sm">
+              <div className="flex items-center gap-2.5 min-w-0">
+                <div className="p-2 bg-emerald-500/20 text-emerald-400 rounded-lg border border-emerald-500/30 shrink-0">
+                  <Sliders className="w-4 h-4" />
+                </div>
+                <div className="min-w-0">
+                  <div className="text-xs font-bold text-gray-200 flex items-center gap-2">
+                    <span>Ortak Kesim & Pim Ayarları:</span>
+                    <span className="text-[10px] font-mono px-2 py-0.5 bg-emerald-900/50 text-emerald-300 border border-emerald-700/50 rounded-full font-bold">
+                      {batchClipping.axis?.toUpperCase()} Ekseni
+                    </span>
+                  </div>
+                  <div className="text-[11px] text-gray-400 font-mono mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                    <span>
+                      Düzlem:{' '}
+                      <strong className="text-gray-300">
+                        {batchClipping.offsetMode === 'percentage'
+                          ? `%${batchClipping.offset || 50} (Yükseklik Ortası)`
+                          : `${batchClipping.offset || 0} mm`}
+                      </strong>
+                    </span>
+                    <span>•</span>
+                    <span>
+                      Pim:{' '}
+                      <strong className="text-cyan-300">
+                        {batchClipping.addPinOnSlice !== false
+                          ? `Ø${batchPin.diameter || 8}×${batchPin.depth || 10}mm ${batchPin.type || 'Silindir'} (+${batchPin.clearance ?? 0.2}mm pay)`
+                          : 'Düz Pimsiz Kesim'}
+                      </strong>
+                    </span>
+                    <span>•</span>
+                    <span>
+                      Mod:{' '}
+                      <strong className="text-purple-300">
+                        {batchPin.mode === 'holes_both'
+                          ? 'Çift Yuva + Ayrı Dübel Pimi'
+                          : batchPin.mode === 'flat'
+                          ? 'Pimsiz Düz'
+                          : 'Pim & Yuva'}
+                      </strong>
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex items-center flex-wrap gap-2 shrink-0">
+                {/* Quick Preset Selector Dropdown */}
+                <div className="flex items-center gap-1.5 bg-gray-900/90 border border-amber-500/40 rounded-lg px-2 py-1">
+                  <Bookmark className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                  <select
+                    value={selectedPresetId}
+                    onChange={(e) => {
+                      const found = availablePresets.find((p) => p.id === e.target.value);
+                      if (found) handleApplyPresetToBatch(found);
+                    }}
+                    className="bg-transparent text-amber-300 text-xs font-semibold focus:outline-none cursor-pointer max-w-[190px] truncate"
+                    title="Kayıtlı veya varsayılan kesim & pim şablonunu toplu ayarlara uygula"
+                  >
+                    <option value="" className="bg-gray-900 text-gray-400">Şablon Seç...</option>
+                    {availablePresets.map((p) => (
+                      <option key={p.id} value={p.id} className="bg-gray-900 text-gray-200">
+                        {p.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <button
+                  onClick={handleSyncWithViewport}
+                  className="py-1 px-2.5 bg-gray-800 hover:bg-gray-700 text-cyan-300 rounded-lg border border-gray-700 text-xs font-semibold transition flex items-center gap-1"
+                  title="3D sahnedeki güncel ayarları buraya aktar"
+                >
+                  <RefreshCw className="w-3 h-3" />
+                  <span>3D Sahnenden Al</span>
+                </button>
+                <button
+                  onClick={() => setActiveSubTab('settings')}
+                  className="py-1 px-2.5 bg-gray-800 hover:bg-gray-700 text-emerald-300 rounded-lg border border-gray-700 text-xs font-semibold transition flex items-center gap-1"
+                  title="Kesim düzlemi ve pim ölçülerini detaylı düzenle"
+                >
+                  <Sliders className="w-3 h-3" />
+                  <span>Ayarları Düzenle</span>
+                </button>
+              </div>
+            </div>
+
             {/* Action Bar: Add Files, Add Presets, Start Processing */}
             <div className="flex flex-wrap items-center justify-between gap-2.5 bg-gray-950/60 p-3 rounded-xl border border-gray-800">
               <div className="flex items-center flex-wrap gap-2">
@@ -561,7 +735,11 @@ export function BatchProcessingModal({
                   multiple
                   accept=".stl"
                   onChange={(e) => {
-                    handleAddFiles(e.target.files);
+                    if (onAddFiles) {
+                      onAddFiles(e.target.files);
+                    } else {
+                      handleAddFiles(e.target.files);
+                    }
                     if (fileInputRef.current) fileInputRef.current.value = '';
                   }}
                   className="hidden"
@@ -575,9 +753,21 @@ export function BatchProcessingModal({
                   <span>STL Dosyaları Ekle</span>
                 </button>
 
+                {/* Add Current Model from Viewport */}
+                {hasActiveModel && onAddCurrentModel && (
+                  <button
+                    onClick={onAddCurrentModel}
+                    className="py-1.5 px-3 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-semibold transition flex items-center gap-1.5 shadow-md shadow-blue-950/40"
+                    title="Aktif 3D sahnede açık olan modeli kuyruğa ekle"
+                  >
+                    <Box className="w-4 h-4" />
+                    <span>Aktif Modeli Ekle ({activeModelName || 'Model'})</span>
+                  </button>
+                )}
+
                 {/* Preset Models Quick Inject */}
                 <button
-                  onClick={handleAddAllPresets}
+                  onClick={() => (onAddAllPresets ? onAddAllPresets() : handleAddAllPresets())}
                   className="py-1.5 px-3 bg-gray-800 hover:bg-gray-700 text-teal-300 border border-teal-500/40 rounded-xl text-xs font-medium transition flex items-center gap-1.5"
                   title="Test için 4 örnek modeli birden kuyruğa ekle"
                 >
@@ -587,7 +777,7 @@ export function BatchProcessingModal({
 
                 {totalCount > 0 && (
                   <button
-                    onClick={handleClearQueue}
+                    onClick={() => (onClearQueue ? onClearQueue() : handleClearQueue())}
                     disabled={isProcessing}
                     className="py-1.5 px-2.5 bg-gray-800/80 hover:bg-red-950/40 text-gray-400 hover:text-red-300 border border-gray-700 hover:border-red-700/60 rounded-xl text-xs transition flex items-center gap-1"
                   >
@@ -598,7 +788,7 @@ export function BatchProcessingModal({
               </div>
 
               {/* Execution Controls */}
-              <div className="flex items-center gap-2">
+              <div className="flex items-center flex-wrap gap-2">
                 {completedCount > 0 && completedCount === totalCount && (
                   <button
                     onClick={handleResetQueueStatus}
@@ -618,18 +808,33 @@ export function BatchProcessingModal({
                     <span>Durdur</span>
                   </button>
                 ) : (
-                  <button
-                    onClick={handleStartProcessing}
-                    disabled={totalCount === 0 || pendingCount === 0}
-                    className={`py-1.5 px-4 rounded-xl text-xs font-bold transition flex items-center gap-1.5 shadow-lg ${
-                      totalCount > 0 && pendingCount > 0
-                        ? 'bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white shadow-emerald-950/50 hover:scale-[1.02]'
-                        : 'bg-gray-800 text-gray-500 cursor-not-allowed border border-gray-700'
-                    }`}
-                  >
-                    <Play className="w-4 h-4 fill-current" />
-                    <span>Toplu İşlemi Başlat ({pendingCount > 0 ? `${pendingCount} Model` : 'Hazır'})</span>
-                  </button>
+                  <>
+                    {/* Primary ONE-GO PROCESS & EXPORT BUTTON */}
+                    <button
+                      onClick={() => handleStartProcessing({ autoExportZip: true })}
+                      disabled={totalCount === 0 || pendingCount === 0}
+                      className={`py-2 px-4 rounded-xl text-xs font-extrabold transition flex items-center gap-2 shadow-xl ${
+                        totalCount > 0 && pendingCount > 0
+                          ? 'bg-gradient-to-r from-emerald-500 via-teal-500 to-cyan-500 hover:from-emerald-400 hover:via-teal-400 hover:to-cyan-400 text-gray-950 shadow-emerald-950/60 hover:scale-[1.02] ring-1 ring-emerald-300/40'
+                          : 'bg-gray-800 text-gray-500 cursor-not-allowed border border-gray-700'
+                      }`}
+                      title="Kuyruktaki tüm modelleri aktif kesim ve pim ayarlarıyla dilimler ve bitince tek ZIP olarak otomatik indirir"
+                    >
+                      <FolderArchive className="w-4 h-4" />
+                      <span>Hepsini Kes ve Tek Seferde İndir ({pendingCount > 0 ? `${pendingCount} Bekliyor` : 'Hazır'})</span>
+                    </button>
+
+                    {/* Secondary Sadece Kes Button */}
+                    <button
+                      onClick={() => handleStartProcessing({ autoExportZip: false })}
+                      disabled={totalCount === 0 || pendingCount === 0}
+                      className="py-2 px-3 bg-gray-800 hover:bg-gray-700 text-gray-300 rounded-xl text-xs font-semibold transition flex items-center gap-1.5 border border-gray-700 hover:border-gray-600"
+                      title="Modelleri kesit düzlemi ve pim yuvalarıyla dilimler, sonuçları incelemek için hazır tutar"
+                    >
+                      <Play className="w-3.5 h-3.5 text-emerald-400 fill-current" />
+                      <span>Sadece Kes</span>
+                    </button>
+                  </>
                 )}
 
                 {completedCount > 0 && (
@@ -884,6 +1089,59 @@ export function BatchProcessingModal({
                     <span>3D Sahneye Uygula</span>
                   </button>
                 )}
+              </div>
+            </div>
+
+            {/* 0. Saved Cutting Presets Quick-Apply Card */}
+            <div className="bg-amber-950/20 p-4 rounded-xl border border-amber-500/30 space-y-3">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold text-amber-300 flex items-center gap-1.5">
+                  <Bookmark className="w-4 h-4 text-amber-400" />
+                  <span>Kayıtlı Kesim ve Pim Şablonları (Presets)</span>
+                </span>
+                <span className="text-[10px] text-amber-400/80 font-medium">
+                  {availablePresets.length} Şablon Mevcut
+                </span>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+                {availablePresets.map((preset) => {
+                  const isSelected = selectedPresetId === preset.id;
+                  return (
+                    <div
+                      key={preset.id}
+                      onClick={() => handleApplyPresetToBatch(preset)}
+                      className={`p-2.5 rounded-xl border cursor-pointer transition text-left flex flex-col justify-between gap-1.5 ${
+                        isSelected
+                          ? 'bg-amber-950/60 border-amber-400 shadow-md shadow-amber-950/40 ring-1 ring-amber-400/40'
+                          : 'bg-gray-900/80 border-gray-800 hover:border-amber-500/40 hover:bg-gray-850'
+                      }`}
+                    >
+                      <div className="flex items-start justify-between gap-1">
+                        <div className="text-xs font-bold text-gray-200 line-clamp-1">
+                          {preset.name}
+                        </div>
+                        {isSelected && (
+                          <BookmarkCheck className="w-4 h-4 text-amber-400 shrink-0" />
+                        )}
+                      </div>
+                      <div className="text-[11px] text-gray-400 line-clamp-1">
+                        {preset.description || preset.category}
+                      </div>
+                      <div className="flex items-center justify-between text-[10px] font-mono text-gray-400 pt-1 border-t border-gray-800/80">
+                        <span className="text-emerald-400">
+                          {preset.clippingConfig?.axis?.toUpperCase()}-Ekseni
+                        </span>
+                        <span className="text-cyan-300">
+                          Ø{preset.pinConfig?.diameter || 8}×{preset.pinConfig?.depth || 10}mm
+                        </span>
+                        <span className="text-purple-300">
+                          ±{preset.pinConfig?.clearance ?? 0.2}mm
+                        </span>
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
             </div>
 
